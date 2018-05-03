@@ -1,0 +1,547 @@
+;   ****************************************************************
+;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com).     *
+;   * All rights reserved except as explicitly noted here.         *
+;   *                                                              *
+;   * Permission to copy this file is granted as long as this      *
+;   * copyright notice is included in its entirety at the          *
+;   * beginning of the file, whether the file is copied in whole   *
+;   * or in part and regardless of whether other information is    *
+;   * added to the copy, and one of the following conditions is    *
+;   * met:                                                         *
+;   *                                                              *
+;   *   1 - Any executable derived from the this file is only run  *
+;   *       on a Embed Inc product.                                *
+;   *                                                              *
+;   *   2 - Any device that contains executable code derived from  *
+;   *       this file is not sold, not distributed for commercial  *
+;   *       advantage, and not more than 10 (ten) instances of the *
+;   *       device are created.                                    *
+;   *                                                              *
+;   * To copy this file otherwise requires explicit permission     *
+;   * from Embed Inc and may also require a fee.                   *
+;   *                                                              *
+;   * The information in this file is provided "as is".  Embed Inc *
+;   * makes no claims of suitability for any particular purpose    *
+;   * nor assumes any liability resulting from its use.            *
+;   ****************************************************************
+;
+;   Include file that implements the common parts of the F18
+;   module within various PIC programmer firmware types.  Each
+;   F18 module must still be customized to the particular project
+;   include file.  The common code that is project-independent
+;   is therefore included into the project-specific module using
+;   this include file.
+;
+         extern  done_read   ;jump here when specific read routine done
+         extern  done_write  ;jump here when specific write routine done
+
+         extern  tadr        ;requested target chip address of operation
+         extern  tadri       ;actual internal target chip address
+         extern  nextwait    ;length of wait to set up on call to WAIT_START
+         extern  wbufsz      ;target chip write buffer size
+         extern  adr_eecon1, adr_eeadr, adr_eeadrh, adr_eedata ;adr of target regs
+         extern_flags        ;declare global flag bits EXTERN
+
+;*******************************************************************************
+;
+;   Constants.
+;
+bit_eepgd equ    7           ;number of EEPGD bit in EECON1
+bit_cfgs equ     6           ;number of CFGS bit in EECON1
+bit_wren equ     2           ;number of WREN bit in EECON1
+bit_wr   equ     1           ;number of WR bit in EECON1
+bit_rd   equ     0           ;number of RD bit in EECON1
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+evbyte   res     1           ;save byte at last even address
+
+
+.f18     code
+
+;*******************************************************************************
+;
+;   Local subroutine SEND20
+;
+;   Send the low 20 bits of REGA to the target.  The low 4 bits are
+;   therefore the command, and the remaining 16 bits the data for
+;   that command.
+;
+         locsub  send20, regf8
+
+         movlw   20          ;pass number of bits to send
+         movwf   reg8
+         gcall   sert_send
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine EXEC_INSTR
+;
+;   Cause the target to execute the instruction in REG1:REG0.
+;
+         locsub  exec_instr, regf0 | regf1 | regf2 | regf8
+;
+;   Shift the instruction 4 bits left in REG2:REG1:REG0.  The low bits will be
+;   set to 0, which is the serial programming instruction to execute the 16 bit
+;   data as a target instruction.
+;
+         clrf    reg2        ;init shifted-out bits to be 0
+         bcf     status, c   ;init first shifted-in bit to be 0
+
+         rlcf    reg0
+         rlcf    reg1
+         rlcf    reg2
+
+         rlcf    reg0
+         rlcf    reg1
+         rlcf    reg2
+
+         rlcf    reg0
+         rlcf    reg1
+         rlcf    reg2
+
+         rlcf    reg0
+         rlcf    reg1
+         rlcf    reg2
+;
+;   Send the low 20 bits of REG2:REG1:REG0 to the target.
+;
+         loadk8  reg8, 20    ;number of bits to send
+         gcall   sert_send   ;send them
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro CORE_INSTR instr
+;
+;   Cause the instruction core to execute the indicated 16 bit instruction.
+;
+;   REG0, REG1, and REG2 are trashed.
+;
+core_instr macro instr
+         loadk24 reg0, ((instr) << 4) ;pass opcode with instruction as data
+         mcall   send20      ;send it
+         endm
+
+;*******************************************************************************
+;
+;   Local subroutine SETSFR
+;
+;   Set the target special function register at the address in REG3 to the
+;   value in REG2.  REG3 is the address within the access bank.
+;
+         locsub  setsfr, regf0 | regf1 | regf8
+;
+;   Send a command to execute core instruction to load the data value into W.
+;
+         clrf    reg0        ;pass CORE INSTRUCTION command
+         movlw   4           ;pass number of bits to send
+         movwf   reg8
+         gcall   sert_send   ;send the command
+
+         movlw   h'0E'       ;high byte of MOVLW instruction
+         movwf   reg1
+         movf    reg2, w     ;low byte of MOVLW instruction is data value
+         movwf   reg0
+         movlw   16          ;number of bits to send
+         movwf   reg8
+         gcall   sert_send   ;send the data value for this command
+;
+;   Send a command to write the W register to the selected SFR.
+;
+         clrf    reg0        ;pass CORE INSTRUCTION command
+         movlw   4           ;pass number of bits to send
+         movwf   reg8
+         gcall   sert_send   ;send the command
+
+         movlw   h'6E'       ;high byte of MOVWF instruction into access bank
+         movwf   reg1
+         movf    reg3, w     ;low byte of MOVWF instruction is target address
+         movwf   reg0
+         movlw   16          ;number of bits to send
+         movwf   reg8
+         gcall   sert_send   ;send the data value for this command
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine BIT_SET
+;
+;   Set the bit indicated in REG2 in the target register at the address in
+;   REG3.  REG3 is the address within the access bank.
+;
+         locsub  bit_set, regf0 | regf1
+
+         setreg  b'10000000', reg1 ;init high word of opcode
+                 ; 1000----  BSF opcode
+                 ; ----XXX-  number of bit to set, filled in later
+                 ; -------0  use access bank addressing
+
+         rlcf    reg2, w     ;move the bit number into position
+         andlw   b'1110'     ;mask in only the bit number field
+         iorwf   reg1        ;set the bit number in the opcode
+
+         movff   reg3, reg0  ;set address field of opcode
+
+         mcall   exec_instr  ;have the target execute the instruction
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine BIT_CLR
+;
+;   Set the bit indicated in REG2 in the target register at the address in
+;   REG3.  REG3 is the address within the access bank.
+;
+         locsub  bit_clr, regf0 | regf1
+
+         setreg  b'10010000', reg1 ;init high word of opcode
+                 ; 1001----  BCF opcode
+                 ; ----XXX-  number of bit to set, filled in later
+                 ; -------0  use access bank addressing
+
+         rlcf    reg2, w     ;move the bit number into position
+         andlw   b'1110'     ;mask in only the bit number field
+         iorwf   reg1        ;set the bit number in the opcode
+
+         movff   reg3, reg0  ;set address field of opcode
+
+         mcall   exec_instr  ;have the target execute the instruction
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro BITSET_EECON1 bit
+;
+;   Set the indicated bit in the target EECON1 register.
+;
+;   REG0 and REG1 are trashed.
+;
+bitset_eecon1 macro bit
+         movlw   (bit)
+         movwf   reg2        ;pass the 0-7 bit number
+         movff   adr_eecon1, reg3 ;pass the register address
+         mcall   bit_set     ;send instruction to set the bit
+         endm
+
+;*******************************************************************************
+;
+;   Macro BITCLR_EECON1 bit
+;
+;   Clear the indicated bit in the target EECON1 register.
+;
+;   REG0 and REG1 are trashed.
+;
+bitclr_eecon1 macro bit
+         movlw   (bit)
+         movwf   reg2        ;pass the 0-7 bit number
+         movff   adr_eecon1, reg3 ;pass the register address
+         mcall   bit_clr     ;send instruction to clear the bit
+         endm
+
+;*******************************************************************************
+;
+;   Local subroutine ADR18F
+;
+;   Set the internal target chip address to match the desired address.
+;   The desired address is in TADR and the current address internal
+;   to the target chip is TADRI.  Nothing is done if the internal
+;   address already matches the desired address.
+;
+         locsub  adr18f, regf2 | regf3
+
+         dbankif gbankadr
+         btfss   flag_tadrkn ;the target address is known ?
+         jump    adr_upd     ;target address unknown, go set it
+;
+;   Check the target address against the desired address.
+;
+         dbankif gbankadr
+         movf    tadr+0, w   ;compare byte 0
+         xorwf   tadri+0, w
+         skip_z              ;match ?
+         jump    adr_upd     ;no, go explicitly set the address
+
+         movf    tadr+1, w   ;compare byte 1
+         xorwf   tadri+1, w
+         skip_z              ;match ?
+         jump    adr_upd     ;no, go explicitly set the address
+
+         movf    tadr+2, w   ;compare byte 2
+         xorwf   tadri+2, w
+
+         skip_nz             ;mismatch ?
+         jump    adr18f_leave ;no, address is already set as desired
+;
+;   Set the target TBLPTR register to the desired address and update
+;   the local copy of the current target address to match.
+;
+adr_upd  unbank
+         dbankif gbankadr
+         bsf     flag_tadrkn ;indicate the target address will be known
+
+         dbankif gbankadr
+         movf    tadr+0, w   ;get the address byte 0
+         movwf   tadri+0     ;update local copy of target address
+         movwf   reg2        ;pass data value
+         movlw   h'F6'       ;pass target register address to write to
+         movwf   reg3
+         mcall   setsfr      ;set value of the special function register
+
+         dbankif gbankadr
+         movf    tadr+1, w   ;get the address byte 1
+         movwf   tadri+1     ;update local copy of target address
+         movwf   reg2        ;pass data value
+         movlw   h'F7'       ;pass target register address to write to
+         movwf   reg3
+         mcall   setsfr      ;set value of the special function register
+
+         dbankif gbankadr
+         movf    tadr+2, w   ;get the address byte 2
+         movwf   tadri+2     ;update local copy of target address
+         movwf   reg2        ;pass data value
+         movlw   h'F8'       ;pass target register address to write to
+         movwf   reg3
+         mcall   setsfr      ;set value of the special function register
+
+adr18f_leave unbank          ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Routine F18_READ
+;
+;   Read the target chip data at address TADR.  The data is returned in the
+;   low bits of REG1,REG0 with unused high bits set to 0.  This routine
+;   must jump to DONE_READ when done.  REG2-REG3, REG8 may be trashed.
+;
+;   This version is for 18F target chips.  Since a data word on this target
+;   is only 8 bits wide, REG1 will always be returned 0.
+;
+         glbent  f18_read
+
+         dbankif gbankadr
+         btfsc   flag_spdata ;in program memory space ?
+         jump    f18r_ee     ;in EEPROM data address space
+
+;**********
+;
+;   In program memory address space.
+;
+         mcall   adr18f      ;make sure target address matches TADR
+         loadk16 reg0, b'1001' ;pass opcode and 8 dummy data bits
+         movlw   12          ;pass total number of bits to send
+         movwf   reg8
+         gcall   sert_send   ;send READ MEMORY AND POSTINCREMENT opcode + 8 clocks
+         movlw   8           ;pass number of bits to receive
+         movwf   reg8
+         gcall   sert_recv   ;read the data bits into REGA
+         gcall   op_inc_tadri ;increment assumed target address by 1.
+         gjump   done_read
+
+;**********
+;
+;   In EEPROM address space.
+;
+f18r_ee  unbank
+         breakpoint
+
+         bitclr_eecon1 eepgd ;not program memory flash
+         bitclr_eecon1 cfgs  ;not config range
+
+         movff   adr_eeadr, reg3 ;load EEADR with address low byte
+         movff   tadr+0, reg2
+         mcall   setsfr
+
+         movff   adr_eeadrh, reg3 ;load EEADRH with address high byte
+         movff   tadr+1, reg2
+         mcall   setsfr
+
+         bitset_eecon1 rd    ;start the EEPROM read, data into EEDATA
+
+         ;   MOVF EEDATA, W
+         ;
+         setreg  b'01010000', reg1 ;build high byte of opcode
+                 ; 010100--  MOVF opcode
+                 ; ------0-  result into W
+                 ; -------0  access bank addressing
+         movff   adr_eedata, reg0 ;low byte of opcode is address field
+         mcall   exec_instr  ;execute the instruction in the target
+
+         core_instr h'6EF5'  ;MOVWF TABLAT
+         core_instr 0        ;NOP
+
+         loadk16 reg0, b'0010' ;pass opcode and 8 dummy data bits
+         movlw   12          ;pass total number of bits to send
+         movwf   reg8
+         gcall   sert_send   ;send command plus 8 dummy write bits
+         movlw   8           ;pass number of bits to receive
+         movwf   reg8
+         gcall   sert_recv   ;read the data bits into REGA
+         gjump   done_read
+
+;*******************************************************************************
+;
+;   Subroutine F18_BUF_SETUP
+;
+;   Set up for writing to the write buffer for a panel.  TADR is the
+;   start address of the 8 byte region that will be written with this
+;   buffer full.  Results are undefined if the low 3 bits of TADR are
+;   not zero.
+;
+         glbsub  f18_buf_setup, regf0 | regf1
+
+         bitset_eecon1 eepgd ;selet program memory flash
+         bitclr_eecon1 cfgs  ;not config range
+
+         popregs savedregs   ;restore saved registers
+
+         jump    adr18f      ;set the write start address, return to caller
+
+;*******************************************************************************
+;
+;   Routine WRITE_18F2520
+;
+;   Write the data in REG1:REG0 to the target chip at address TADR.
+;   This routine must jump to DONE_WRITE when done.  REG0-REG3, REG8
+;   may be trashed.  NEXTWAIT has been initialized with the TPROG
+;   value.
+;
+;   This version is for the 18F2520 and chips that share the same
+;   programming spec.  This routine only handles ordinary program
+;   memory or data EEPROM, depending on the address space setting.
+;   Data words on PIC 18 are all single bytes, so the REG1 value
+;   is ignored in this version.
+;
+;   Program memory writes must be performed on whole write buffers
+;   at a time sequentially.  It is assumed that EECON1 is already
+;   properly set up.
+;
+         glbent  write_18f2520
+
+         dbankif gbankadr
+         btfsc   flag_spdata ;in program memory space ?
+         jump    f18w_ee     ;in EEPROM data address space
+
+;**********
+;
+;   In program memory address space.
+;
+         dbankif gbankadr
+         btfsc   tadr+0, 0   ;this write is to even address ?
+         jump    f18_odd     ;this byte is to odd address
+         movff   reg0, evbyte ;save byte at even address for next time
+         mcall   adr18f      ;make sure target is set to this address
+         gjump   done_write  ;nothing more to do on even address write
+;
+;   The byte in REG0 is for an odd address.  The target has been set
+;   to the even address, and the data byte for the even address has
+;   been saved in EVBYTE.
+;
+f18_odd  unbank              ;write is to an odd address
+         movff   reg0, reg1  ;get 16 bit command payload into REG1:REG0
+         movff   evbyte, reg0
+         clrf    reg2
+         bcf     status, c
+         rlcf    reg0        ;shift payload into position within 20 bit command
+         rlcf    reg1
+         rlcf    reg2
+         rlcf    reg0
+         rlcf    reg1
+         rlcf    reg2
+         rlcf    reg0
+         rlcf    reg1
+         rlcf    reg2
+         rlcf    reg0
+         rlcf    reg1
+         rlcf    reg2
+
+         movlw   20          ;pass number of bits to send
+         movwf   reg8
+         dbankif gbankadr
+         decf    wbufsz, w   ;get mask for offset into write buffer
+         movwf   reg3        ;save mask
+         andwf   tadr+0, w   ;make offset into write buffer
+         xorwf   reg3, w     ;compare to last offset in write buffer
+         skip_nz             ;not last address in write buffer ?
+         jump    f18_w       ;last address, do the actual write
+         movlw   b'1101'     ;TABLE WRITE, POSTINCREMENT BY 2
+         iorwf   reg0        ;merge opcode into command data
+         gcall   sert_send   ;send the command
+
+         dbankif gbankadr
+         movlw   2           ;amount to increment assumed target address by
+         addwf   tadri+0
+         movlw   0
+         addwfc  tadri+1
+         addwfc  tadri+2
+         gjump   done_write  ;all done with this write
+;
+;   This address is for the last byte in the current write buffer.  The data
+;   must be written without changing the address, and an actual write cycle
+;   performed.  The 16 bit data payload of the 20 bit write command has
+;   already been loaded into REG2:REG1:REG0 with the 4 bit opcode set to 0.
+;
+f18_w    unbank              ;writing last byte in write buffer
+         movlw   b'1111'     ;TABLE WRITE, START PROGRAMMING
+         iorwf   reg0
+         gcall   sert_send   ;send the command
+
+         clrf    reg0
+         movlw   3
+         movwf   reg8
+         gcall   sert_send   ;send first 3 bits of NOP command
+         gcall   sert_clkh   ;raise PGC to start the timed write
+         gcall   wait_start  ;start the wait timer
+         gcall   wait_wait   ;wait for programming time over
+         gcall   sert_clkl   ;end the programming time
+         dbankif gbankadr
+tickdc   equ     ((1000 + tick100ns - 1) / tick100ns) + 1
+         movlw   tickdc      ;set wait for high voltage discharge
+         movwf   nextwait+0
+         gcall   wait_start
+         gcall   wait_wait   ;wait for high voltage discharge
+         clrf    reg0        ;pass 16 bit payload for NOP instruction
+         clrf    reg1
+         movlw   16
+         movwf   reg8
+         gcall   sert_send   ;send rest of NOP instruction
+
+         gjump   done_write  ;all done with this write
+
+;**********
+;
+;   In EEPROM address space.  Each byte is written separately and the address
+;   must be set explicitly for each byte.  EECON1 must already be configured
+;   correctly.  This means the EEPGD and CFGS bits must be cleared and the
+;   WREN bit must be set.
+;
+f18w_ee  unbank
+         movff   adr_eeadr, reg3 ;load EEADR with address low byte
+         movff   tadr+0, reg2
+         mcall   setsfr
+
+         movff   adr_eeadrh, reg3 ;load EEADRH with address high byte
+         movff   tadr+1, reg2
+         mcall   setsfr
+
+         movff   adr_eedata, reg3 ;load EEDATA with the data byte
+         movff   reg0, reg2
+         mcall   setsfr
+
+         bitset_eecon1 wr    ;start the erase/write
+
+         core_instr h'0000'  ;NOP, write starts on 4th falling edge of PGC
+         core_instr h'0000'
+         gcall   wait_start  ;start wait for EEPROM write to complete
+         gjump   done_write  ;all done with this write

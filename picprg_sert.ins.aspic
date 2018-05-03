@@ -1,0 +1,290 @@
+;   ***************************************************************
+;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com)     *
+;   *                                                             *
+;   * Permission to copy this file is granted as long as this     *
+;   * copyright notice is included in its entirety at the         *
+;   * beginning of the file, whether the file is copied in whole  *
+;   * or in part and regardless of whether other information is   *
+;   * added to the copy.                                          *
+;   *                                                             *
+;   * The contents of this file may be used in any way,           *
+;   * commercial or otherwise.  This file is provided "as is",    *
+;   * and Embed Inc makes no claims of suitability for a          *
+;   * particular purpose nor assumes any liability resulting from *
+;   * its use.                                                    *
+;   ***************************************************************
+;
+;   Include file that implements the common parts of the SERT
+;   module within various PIC programmer firmware types.  Each
+;   SERT module must still be customized to the particular project
+;   include file.  The common code that is project-independent
+;   is therefore included into the project-specific module using
+;   this include file.
+;
+
+;
+;*******************************************************************************
+;
+;   Subroutine SERT_CLKL
+;
+;   Drive the clock line low.
+;
+         glbsub  sert_clkl, noregs
+
+         pgc_low 3
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine SERT_CLKH
+;
+;   Drive the clock line high
+;
+         glbsub  sert_clkh, noregs
+
+         pgc_high 3
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine SERT_CLKOFF
+;
+;   Set the clock line drivers to high impedence.
+;
+         glbsub  sert_clkoff, noregs
+
+         pgc_off 3
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine SERT_DATL
+;
+;   Drive the clock line low.
+;
+         glbsub  sert_datl, noregs
+
+         pgd_low 3
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine SERT_DATH
+;
+;   Drive the clock line high
+;
+         glbsub  sert_dath, noregs
+
+         pgd_high 3
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine SERT_DATOFF
+;
+;   Set the data line drivers to high impedence.
+;
+         glbsub  sert_datoff, noregs
+
+         pgd_off 3
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine SERT_DATR
+;
+;   Read the data line and return its value in the low bit of REG0.
+;   The remaining REG0 bits are cleared.
+;
+         glbsub  sert_datr, noregs
+
+         clrf    reg0        ;init to line is low
+         skip_pgdlo 4        ;line really is low ?
+         bsf     reg0, 0     ;no, return indicating high
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine SERT_TEST
+;
+;   Allow for testing the PGC and PGD lines by clocking them at high speed
+;   in quadrature.
+;
+         glbsub  sert_test, noregs
+
+test_loop
+         pgc_high 3
+         pgd_high 1
+         pgc_low 1
+         pgd_low 1
+         jump    test_loop
+;
+;*******************************************************************************
+;
+;   Subroutine SERT_SEND
+;
+;   Send raw data bits to the target chip.  The bits are sent from REGA,
+;   starting with the LSB.  REG8 indicates the number of bits to send,
+;   which must be from 1 to 32.
+;
+;   The clock line is assumed to be driven low on entry and will be left
+;   driven low on exit.  The data line is assumed to be off and will be left
+;   off.
+;
+         glbsub  sert_send, regfa | regf8
+
+         btfss   rega+0, 0   ;first bit is a 1 ?
+         jump    sendbit0    ;first bit is a 0
+;
+;   Send a 1 bit.
+;
+sendbit1 unbank
+         pgd_high 5
+         pgc_high 999        ;drive the clock high
+         rrcf    rega+3      ;move the next data bit into place
+         rrcf    rega+2
+         rrcf    rega+1
+         rrcf    rega+0
+         pgc_low 5           ;drive the clock line low again
+
+         dcfsnz  reg8        ;count one less bit left to do
+         jump    send_leave  ;all done
+         btfsc   rega+0, 0   ;next bit is a 0 ?
+         jump    sendbit1    ;next bit is a 1
+;
+;   Send a 0 bit.
+;
+sendbit0 unbank
+         pgd_low 5           ;set the data line to this bit value
+         pgc_high 999        ;drive the clock high
+         rrcf    rega+3      ;move the next data bit into place
+         rrcf    rega+2
+         rrcf    rega+1
+         rrcf    rega+0
+         pgc_low 5           ;drive the clock line low again
+
+         dcfsnz  reg8        ;count one less bit left to do
+         jump    send_leave  ;all done
+         btfss   rega+0, 0   ;next bit is a 1 ?
+         jump    sendbit0    ;next bit is a 0
+         jump    sendbit1    ;next bit is a 1
+;
+;   Common exit point
+;
+send_leave unbank            ;jump here on done sending all bits
+         pgd_off 3           ;leave data line undriven
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine SERT_SEND6
+;
+;   Send the low 6 bits of REG0 to the target, starting with the LSB.
+;
+         glbsub  sert_send6, regf8
+
+         movlw   6           ;pass number of bits to send
+         movwf   reg8
+         mcall   sert_send   ;send the bits
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine SERT_SEND14SS
+;
+;   Send the 14 data bits in the low bits of REG1,REG0 to the target.
+;   The data bits will be surrounded by a 0 start and stop bit, for a
+;   total of 16 bits sent.
+;
+         glbsub  sert_send14ss, regf0 | regf1 | regf8
+
+         rlcf    reg0        ;move the 14 data bits into position
+         rlcf    reg1
+         bcf     reg0, 0     ;set the start bit to 0
+         bcf     reg1, 7     ;set the stop bit to 0
+
+         movlw   16          ;pass the number of bits to send
+         movwf   reg8
+
+         mcall   sert_send   ;send the bits
+
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine SERT_RECV
+;
+;   Receive raw data bits from the target.  The bits are received in least to
+;   most significant order, and are returned in the low bits of REGA with the
+;   unused upper bits set to 0.  REG8 indicates the number of bits to receive,
+;   which must be from 1 to 32.
+;
+         glbsub  sert_recv, regf8 | regf9
+
+         pgc_low 100         ;make sure the clock line is low
+         pgd_off 100         ;make sure our data line drivers are off
+         movlw   33          ;init number of bits to shift right after receive + 1
+         movwf   reg9
+
+recv_loop                    ;back here to receive each new bit
+         pgc_high 3          ;set the clock line high, start target sending data
+         bcf     status, c   ;shift a 0 bit into MSB of REGA
+         rrcf    rega+3
+         rrcf    rega+2
+         rrcf    rega+1
+         rrcf    rega+0
+         decf    reg9        ;count one less bit to shift right needed after receive
+         skip_pgdlo 7        ;data line is low, data bit already set correctly ?
+         bsf     rega+3, 7   ;no, set the new bit to 1
+         pgc_low 2           ;lower the clock line
+         decfsz  reg8        ;count one less bit left to do
+         jump    recv_loop   ;back to receive the next bit
+;
+;   All the bits have been received into REGA by shifting them in from
+;   the MSB.  Now shift REGA right so that the first received bit ends
+;   up in the LSB.  REG9 was initialized to 33 and decremented by 1 for
+;   each bit shifted into REGA, so REG9 contains the number of bits
+;   to shift REGA right + 1 to normalize the value in the LSB.
+;
+recv_norm
+         dcfsnz  reg9        ;make number of bits still to shift right
+         jump    recv_dnorm  ;all done normalizing the return value
+
+         bcf     status, c   ;shift a 0 bit into REGA from the MSB
+         rrcf    rega+3
+         rrcf    rega+2
+         rrcf    rega+1
+         rrcf    rega+0
+         jump    recv_norm   ;back to do next bit
+
+recv_dnorm                   ;done normalizing the value in LSB of REGA
+         leaverest
+;
+;*******************************************************************************
+;
+;   Subroutine SERT_RECV14SS
+;
+;   Receive 14 data bits from the target, surrounded by a start and stop
+;   bit.  The 14 data bits are returned in the low bits of REG1,REG0 with
+;   the unused high bits set to 0.
+;
+         glbsub  sert_recv14ss, regf2 | regf3 | regf8
+
+         movlw   16          ;pass number of data bits to receive
+         movwf   reg8
+         mcall   sert_recv   ;receive raw 16 bits into REG1,REG0, REG3,REG2 cleared
+
+         rrcf    reg1        ;align the 14 data bits into the LSB
+         rrcf    reg0
+         movlw   b'00111111' ;get mask for the data bits in REG1
+         andwf   reg1        ;make sure the unused bits in REG1 are 0
+
+         leaverest

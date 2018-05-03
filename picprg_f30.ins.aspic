@@ -1,0 +1,1430 @@
+;   ****************************************************************
+;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com).     *
+;   * All rights reserved except as explicitly noted here.         *
+;   *                                                              *
+;   * Permission to copy this file is granted as long as this      *
+;   * copyright notice is included in its entirety at the          *
+;   * beginning of the file, whether the file is copied in whole   *
+;   * or in part and regardless of whether other information is    *
+;   * added to the copy, and one of the following conditions is    *
+;   * met:                                                         *
+;   *                                                              *
+;   *   1 - Any executable derived from the this file is only run  *
+;   *       on a Embed Inc product.                                *
+;   *                                                              *
+;   *   2 - Any device that contains executable code derived from  *
+;   *       this file is not sold, not distributed for commercial  *
+;   *       advantage, and not more than 10 (ten) instances of the *
+;   *       device are created.                                    *
+;   *                                                              *
+;   * To copy this file otherwise requires explicit permission     *
+;   * from Embed Inc and may also require a fee.                   *
+;   *                                                              *
+;   * The information in this file is provided "as is".  Embed Inc *
+;   * makes no claims of suitability for any particular purpose    *
+;   * nor assumes any liability resulting from its use.            *
+;   ****************************************************************
+;
+;   Include file that impliments the common parts of the F30
+;   module within various PIC programmer firmware types.  Each
+;   F30 module must still be customized to the particular project
+;   include file.  The common code that is project-independent
+;   is therefore included into the project-specific module using
+;   this include file.
+;
+;   For efficiency, some of the target working registers are assigned
+;   specific functions.  These are:
+;
+;     W0  - Scratch data value.
+;
+;     W1  - Instruction word 0 low word
+;
+;     W2  - Instruction word 1 low word
+;
+;     W3  - Instruction word 2 low word
+;
+;     W4  - Instruction word 3 low word
+;
+;     W5  - Instruction 1 high byte : instruction 0 high byte
+;
+;     W6  - Instruction 3 high byte : instruction 2 high byte
+;
+;     W7  - Pointer to data bytes in W5,W6, 000Ah (adr of W5) on idle
+;
+;     W8  - 4008h, NVMCON value for writing one word to configuration memory.
+;
+;     W9  - 4004h, NVMCON value for writing one word to data memory.
+;
+;     W10 - 4001h, NVMCON value for writing to normal program memory.
+;
+;     W11 - Constant 55h, for NVMKEY unlock sequence.
+;
+;     W12 - Constant AAh, for NVMKEY unlock sequence.
+;
+;     W14:W13  - Current address.
+;
+;     W15 -
+;
+;     TBLPAG - High word of current address, loaded from W14.
+;
+;   Actions in this module are modified by the following global state:
+;
+;     FLAG_24H  -  Indicates a 24H, 24F, 24FJ, or 33F part.  Causes:
+;
+;       GOTO 200h after reset and periodically instead of the default
+;       GOTO 100h.
+;
+;       5 extra clocks after reset instead of the default two NOPs.
+;
+;       No NVMKEY unlock sequence for erasing or writing.
+;
+;       No manual clear of NVMCON,WR when done writing.
+;
+;       Waits for automatic clear of NVMCON,WR before proceeding after a write.
+;
+;     NVMCON_PROG  -  NVMCON register value for writing to program memory.
+;       Default = 4001h.
+;
+;     NVMCON_CONF  -  NVMCON register value for writing to configuration memory.
+;       Default = 4008h.
+;
+         extern  done_reset  ;jump here when specific reset routine done
+         extern  done_read   ;jump here when specific read routine done
+         extern  done_write  ;jump here when specific write routine done
+
+         extern  tadr        ;requested target chip address of operation
+         extern  tadri       ;actual internal target chip address
+         extern  datadr      ;start address of data EEPROM mapping
+         extern  nextwait    ;clock ticks to set up next wait for
+         extern  wbufsz      ;target chip write buffer size
+         extern  tprog       ;wait time after write in timer 2 ticks
+         extern  tprogf      ;write wait time, units of instruction cycles
+         extern  adr_visi, adr_tblpag ;addresses of target chip registers
+         extern  adr_nvmcon, adr_nvmkey, adr_nvmadr, adr_nvmadru
+
+         extern_flags        ;declare global flag bits EXTERN
+
+/var new ii integer          ;scratch preprocessor integer
+/var new r real              ;scratch preprocessor floating point
+
+;*******************************************************************************
+;
+;   Global state.
+;
+         defram  gbankadr
+
+nvmcon_prog res  2           ;NVMCON value for program memory writes
+nvmcon_conf res  2           ;NVMCON value for configuration memory writes
+
+         global  nvmcon_prog, nvmcon_conf
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+cntpc    res     1           ;instructions until reset PC to 100h
+
+rdadr    res     3           ;start address of cached data in RD0,RD1
+rd0      res     3           ;first cached program memory word
+rd1      res     3           ;second cached program memory word
+
+
+.f30     code
+;*******************************************************************************
+;
+;   Subroutine F30_INIT
+;
+;   Initialize the hardware and software state managed by this module.
+;
+         glbsub  f30_init, noregs
+
+         dbankif gbankadr
+         loadk16 nvmcon_prog, h'4001'
+         loadk16 nvmcon_conf, h'4008'
+
+         dbankif lbankadr
+         movlw   1
+         movwf   cntpc       ;cause PC reset to 100h next XINST call
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine XINST
+;
+;   Cause the target to execute the instruction in REG2:REG1:REG0.
+;
+         locsub  xinst, regf3 | regf8
+;
+;   Decrement the CNTPC counter and reset the target chip PC to 100h or 200h if
+;   the counter becomes 0.  Even though the target chip PC is not used to fetch
+;   instructions, it still increments each instruction and must always be
+;   pointing to valid executable memory.  To ensure this, the instruction
+;   sequence
+;
+;     NOP
+;     NOP
+;     GOTO  0x100  (or GOTO 0x200 for 24 and 33 family devices)
+;     NOP          second word of GOTO instruction
+;
+;     NOP          additional NOPs needed by 24EP and 33EP
+;     NOP
+;
+;   is inserted here to reset the PC to 100h, which is the start of executable
+;   memory.  CNTPC is reset when this is done.
+;
+         dbankif lbankadr
+         decfsz  cntpc       ;one less instruction until PC reset required
+         jump    done_pcreset ;don't need PC reset right now
+         ;
+         ;   The PC must be reset now.
+         ;
+         pushregs regf0 | regf1 | regf2 ;temp save registers
+
+         movlw   28          ;4 bit SIX command plus 24 bit data value
+         movwf   reg8
+         loadk32 reg0, h'0000000'
+         gcall   sert_send   ;NOP
+         gcall   sert_send   ;NOP
+
+         loadk32 reg0, h'0401000' ;SIX command plus GOTO 100h instruction
+         dbankif gbankadr
+         movlw   h'20'
+         btfsc   flag_24h    ;not a PIC 24H or 33F ?
+         movwf   reg1        ;is PIC 24H or 33F, change to GOTO 200h
+         gcall   sert_send   ;GOTO
+
+         loadk32 reg0, h'0000000'
+         gcall   sert_send   ;second word of GOTO instruction
+
+         skip_flag 33ep
+         jump    inst_d33ep
+         gcall   sert_send   ;extra NOPs required for EP series
+         gcall   sert_send
+inst_d33ep unbank
+
+         popregs regf0 | regf1 | regf2 ;restore saved registers
+
+done_pcreset                 ;done making sure PC at valid instruction address
+;
+;   Send the SIX command followed by the 24 bit instruction word to execute.
+;   The SIX command opcode is 0000b.  The instruction word is shifted 4 bits
+;   left with 0 bits shifted in, then the whole 28 bits are sent to the
+;   target in one operation.
+;
+         pushregs regf0 | regf1 | regf2
+
+         clrf    reg3        ;init high byte of 32 bit word
+         bcf     status, c   ;init first bit to shift in
+
+         rlcf    reg0        ;shift left 4 bits, with zero bits shifted in
+         rlcf    reg1
+         rlcf    reg2
+         rlcf    reg3
+
+         rlcf    reg0
+         rlcf    reg1
+         rlcf    reg2
+         rlcf    reg3
+
+         rlcf    reg0
+         rlcf    reg1
+         rlcf    reg2
+         rlcf    reg3
+
+         rlcf    reg0
+         rlcf    reg1
+         rlcf    reg2
+         rlcf    reg3
+
+         movlw   28          ;pass total number of bits to send
+         movwf   reg8
+         gcall   sert_send   ;send SIX command and target opcode
+
+         popregs regf0 | regf1 | regf2
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine INST_NOP
+;
+;   Cause the target to execute a NOP instruction.
+;
+         locsub  inst_nop, regf0 | regf1 | regf2
+
+         clrf    reg0        ;pass NOP opcode
+         clrf    reg1
+         clrf    reg2
+         mcall   xinst
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine NOP_EP
+;
+;   Cause the target to execute a NOP instruction if it is a EP series device.
+;   These devices need extra NOPs in various places.
+;
+         locsub  nop_ep, noregs
+
+         skip_flag 33ep      ;is EP series ?
+         jump    nop_dep     ;no, skip this section
+         mcall   inst_nop
+nop_dep  unbank
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine NOP3_EP
+;
+;   Cause the target to execute three NOP instructions if it is a EP series
+;   device.  These devices need extra NOPs in various places.
+;
+         locsub  nop3_ep, noregs
+
+         skip_flag 33ep      ;is EP series ?
+         jump    nop3_dep    ;no, skip this section
+         mcall   inst_nop
+         mcall   inst_nop
+         mcall   inst_nop
+nop3_dep unbank
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro INST opc
+;
+;   Execute the instruction OPC in the target.  This is a convenience wrapper
+;   that passes the opcode to subroutine XINST.
+;
+;   REG2 - REG0 will be left containing the opcode.
+;
+inst     macro   opc
+         loadk24 reg0, (opc)
+         mcalll  xinst
+         endm
+
+;*******************************************************************************
+;
+;   Local subroutine VISI
+;
+;   Execute the REGOUT command to return the contents of the VISI register in
+;   REG1:REG0.
+;
+         locsub  visi, regf2 | regf3 | regf8
+
+         mcall   inst_nop
+;
+;   Send the REGOUT command followed by 8 clock cycles.
+;
+         loadk16 reg0, 1     ;REGOUT opcode plus 8 extra 0 bits
+         movlw   12          ;pass number of bits to send
+         movwf   reg8
+         gcall   sert_send   ;send REGOUT and 8 additional 0 bits
+;
+;   Read the return data.
+;
+         movlw   16          ;pass number of bits to read
+         movwf   reg8
+         gcall   sert_recv   ;read the data into REGA
+
+         mcall   nop_ep      ;add NOP instruction for EP series
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutines LOAD_W0 to LOAD_W14
+;
+;   Load target chip Wn register from REG1:REG0.
+;
+/loop for wn from 0 to 14    ;once for each Wreg to generate routine for
+  /write
+         locsub  load_w[v wn]
+         movlw   [shiftl wn 4] | 2 ;reg number in high nibble, 2 in low nibble
+         jump    loadwn      ;jump to common code for all LOADWn subroutines
+  /endloop
+;
+;   Common code for all the LOADWn subroutines.  W contains the 0-15 register
+;   number in the upper nibble and 2 in the lower nibble.  Nothing has been
+;   pushed on the data stack yet and no registers have been saved.
+;
+;   This code only works on a PIC18 because the PUSHREGS macro does not trash W
+;   on these processors.
+;
+;   The opcode for MOV #xxx, Wn is:
+;
+;     0010 xxxx xxxx xxxx xxxx wwww
+;
+;   where "x" is the 16 bit data value, and "w" the 0-15 register number.
+;
+;   W currently contains:
+;
+;     wwww 0010
+;
+loadwn
+         pushregs regf0 | regf1 | regf2
+
+         movwf   reg2        ;make opcode rotated right 4 bits in REG2:REG1:REG0
+
+         rlcf    reg2, w     ;rotate the 24 bit opcode 4 bits left
+         rlcf    reg0
+         rlcf    reg1
+         rlcf    reg2
+         rlcf    reg2, w
+         rlcf    reg0
+         rlcf    reg1
+         rlcf    reg2
+         rlcf    reg2, w
+         rlcf    reg0
+         rlcf    reg1
+         rlcf    reg2
+         rlcf    reg2, w
+         rlcf    reg0
+         rlcf    reg1
+         rlcf    reg2
+
+         mcall   xinst       ;execute the instruction
+
+         popregs regf0 | regf1 | regf2
+         return
+
+;*******************************************************************************
+;
+;   Local subroutines STORE_Wn
+;
+;   These each store a particular W register to the data memory address in the
+;   16 bit variable pointed to by FSR0.  The write will always be word-aligned.
+;   The low bit of the address is ignored and 0 always used.
+;
+;   A MOV Wn, <adr> instruction will be executed.
+;
+;   FSR0 is preserved.
+;
+/loop for wn from 0 to 15    ;once for each Wreg to generate routine for
+  /write
+         locsub  store_w[v wn]
+         movlw   [v wn]      ;get the source register number into W
+         jump    store_w     ;to common code
+  /endloop
+;
+;   Common code for the STORE_Wn subroutines.  The address to store to is where
+;   FSR0 is pointing, and the Wreg number in W.  Nothing has been pushed onto
+;   the stack, and all registers must be preserved with their current values.
+;
+;   The opcode for MOV Wn, <adr> is:
+;
+;     1000 1aaa aaaa aaaa aaaa wwww
+;
+;   where the "a" indicates target address bits and "w" the Wreg number.  Only
+;   the high 15 target address bits are encoded into the instruction since the
+;   low bit is implied to be 0 for word alignment.
+;
+store_w  unbank
+         enter   regf0 | regf1 | regf2
+
+         movff   postinc0, reg0 ;get target address into REG1:REG0
+         movff   postdec0, reg1
+         bcf     reg0, 0     ;make sure low address bit is 0
+         clrf    reg2        ;expand the address into REG2:REG1:REG0
+
+         bcf     status, c   ;shift REG2:REG1:REG0 left 3 bits
+         rlcf    reg0
+         rlcf    reg1
+         rlcf    reg2
+         rlcf    reg0
+         rlcf    reg1
+         rlcf    reg2
+         rlcf    reg0
+         rlcf    reg1
+         rlcf    reg2
+
+         iorwf   reg0        ;merge the wwww bits into the opcode being built
+         movlw   h'88'       ;merge the fixed bits into the opcode being built
+         iorwf   reg2
+
+         mcall   xinst       ;execute the instruction in REG2:REG1:REG0
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutines RAM_Wn
+;
+;   Each of these routines load the contents of a RAM location into a W
+;   particular W register.  FSR0 is pointing to the 16 bit variable holding the
+;   address of the RAM location to fetch.  The read is always word-aligned.  The
+;   low bit of the address is ignored.
+;
+;   A MOV <adr>, Wn instruction will be executed.
+;
+;   FSR0 is preserved.
+;
+/loop for wn from 0 to 15    ;once for each Wreg to generate routine for
+  /write
+         locsub  ram_w[v wn]
+         movlw   [v wn]      ;get the source register number into W
+         jump    ram_w       ;to common code
+  /endloop
+;
+;   Common code for the RAM_Wn subroutines.  The address to load from is where
+;   FSR0 is pointing, and the Wreg number is in W.  Nothing has been pushed onto
+;   the stack, and all registers must be preserved with their current values.
+;
+;   The opcode for MOV <adr>, Wn is:
+;
+;     1000 0aaa aaaa aaaa aaaa wwww
+;
+;   where the "a" indicates target address bits and "w" the Wreg number.  Only
+;   the high 15 target address bits are encoded into the instruction since the
+;   low bit is implied to be 0 for word alignment.
+;
+ram_w    unbank
+         enter   regf0 | regf1 | regf2
+
+         movff   postinc0, reg0 ;get target address into REG1:REG0
+         movff   postdec0, reg1
+         bcf     reg0, 0     ;make sure low address bit is 0
+         clrf    reg2        ;expand the address into REG2:REG1:REG0
+
+         bcf     status, c   ;shift REG2:REG1:REG0 left 3 bits
+         rlcf    reg0
+         rlcf    reg1
+         rlcf    reg2
+         rlcf    reg0
+         rlcf    reg1
+         rlcf    reg2
+         rlcf    reg0
+         rlcf    reg1
+         rlcf    reg2
+
+         iorwf   reg0        ;merge the wwww bits into the opcode being built
+         movlw   h'80'       ;merge the fixed bits into the opcode being built
+         iorwf   reg2
+
+         mcall   xinst       ;execute the instruction in REG2:REG1:REG0
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine W14_TBLPAG
+;
+;   Copy the contents of W14 into the TBLPAG register.
+;
+         locsub  w14_tblpag
+
+         lfsr    0, adr_tblpag
+         mcall   store_w14
+         mcall   inst_nop
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine F30_NOINT15
+;
+;   Guarantee that the next 15 instructions will not be interrupted in between
+;   with a jump back to 100h.  Subroutine XINST automatically inserts a jump
+;   back to 100h every 256 instructions to keep the PC pointing to valid program
+;   memory.  This routine causes such a jump to be inserted before the next
+;   instruction if it would otherwise occur anywhere between the next 15
+;   instructions.  This only causes slight inefficiency by performing the jump
+;   up to 15 instructions earlier than required.
+;
+         locsub  f30_noint15, noregs
+
+         dbankif lbankadr
+         movf    cntpc, w    ;get instructions left - 1 before next jump
+         andlw   b'11110000' ;mask to make 0 if within 15 instructions of jump
+         movlw   1           ;get value to force jump before next instruction
+         skip_nz             ;not close, no need to force early jump ?
+         movwf   cntpc       ;force jump before next instruction
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine LOAD_WDEF
+;
+;   Load the default assumed values in the target W registers.  Other code
+;   expects these registers to be set.
+;
+         locsub  load_wdef, regf0 | regf1
+
+         loadk16 reg0, h'000A' ;init pointer to data bytes
+         mcall   load_w7
+
+         movff   nvmcon_conf+0, reg0 ;set NVMCON for writing to config words
+         movff   nvmcon_conf+1, reg1
+         mcall   load_w8
+
+         loadk16 reg0, h'4004' ;NVMCON value for writing one EEPROM word
+         mcall   load_w9
+
+         movff   nvmcon_prog+0, reg0 ;set NVMCON for writing to program memory
+         movff   nvmcon_prog+1, reg1
+         mcall   load_w10
+
+         loadk16 reg0, h'55' ;write unlock sequence value 1
+         mcall   load_w11
+
+         loadk16 reg0, h'AA' ;write unlock sequence value 2
+         mcall   load_w12
+
+         loadk16 reg0, h'0000' ;current address low word
+         mcall   load_w13
+
+         loadk16 reg0, h'0000' ;current address high word
+         mcall   load_w14
+         mcall   w14_tblpag  ;copy high address into TBLPAG register
+
+         dbankif gbankadr
+         loadk24 tadri, 0    ;update cached copy of target chip address
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine F30_SETADR
+;
+;   Make sure the target chip address in W14:W13 matches the desired address in
+;   TADR.  TADRI is the local copy of the target chip address.
+;
+         locsub  f30_setadr, regf0 | regf1 | regf2
+
+         dbankif gbankadr
+         movf    tadr+0, w
+         xorwf   tadri+0, w  ;compare low bytes
+         movwf   reg0        ;temp save different bits
+         movf    tadr+1, w
+         xorwf   tadri+1, w  ;compare middle bytes
+         iorwf   reg0
+         movf    tadr+2, w
+         xorwf   tadri+2, w  ;compare high bytes
+         iorwf   reg0, w     ;make OR of all the bits that don't match
+         bz      adr_set     ;target address already set as desired ?
+;
+;   The target address is different from the desired address.  Update
+;   the target address.
+;
+         dbankif gbankadr
+         btfsc   flag_spdata ;in program memory space ?
+         jump    adrdat      ;in data memory space
+
+;**********
+;
+;   In program memory space.  The address in TADR is used directly.
+;
+         dbankif gbankadr
+         movf    tadr+2, w   ;get the desired address high byte
+         movwf   tadri+2     ;update cached target address high byte
+         movwf   reg0
+         clrf    reg1
+         mcall   load_w14    ;set high word of address in target chip
+
+         dbankif gbankadr
+         movf    tadr+0, w   ;get the desired address low byte
+         movwf   tadri+0     ;update cached target address low byte
+         movwf   reg0
+         movf    tadr+1, w   ;get the desired address middle byte
+         movwf   tadri+1     ;update cached target address middle byte
+         movwf   reg1
+         jump    adrcom      ;to common code to finish setting the address
+
+;**********
+;
+;   In data address space.  The data memory is mapped to every other
+;   address starting at DATADR in program memory address space.
+;
+adrdat   unbank
+         loadk16 reg0, h'007F' ;set high word of address
+         mcall   load_w14
+
+         dbankif gbankadr
+         bcf     status, c
+         rlcf    tadr+0, w   ;make 2x raw address in REG1:REG0
+         movwf   reg0
+         rlcf    tadr+1, w
+         movwf   reg1
+         movf    datadr+0, w ;add EEPROM mapped start address
+         addwf   reg0
+         movf    datadr+1, w
+         addwfc  reg1
+         iorwf   reg1        ;make sure address stays in legal range
+
+;**********
+;
+;   Common code used for both program and data address space.  W14 must already
+;   be set to the high word of the address, and the low word of the address is
+;   in REG1:REG0.
+;
+adrcom   unbank
+         mcall   load_w13    ;set low word of address from REG1:REG0
+         mcall   w14_tblpag  ;mov w14, Tblpag
+         mcall   nop_ep
+
+adr_set  unbank              ;target address is set as desired
+         leaverest
+
+;*******************************************************************************
+;
+;   Routine F30_RESET
+;
+;   Perform additional reset operation required by the target chip or the state
+;   in this module.  The chip itself has already been reset and Vdd restored to
+;   the original level if it wasn't off.
+;
+;   This routine must jump to DONE_RESET when done.  Registers REG0-REG3 and
+;   REG8 may be trashed.
+;
+         glbent  f30_reset
+
+         dbankif lbankadr
+         setf    cntpc       ;leave maximum time before reset PC to start of memory
+         dbankif gbankadr
+         bcf     flag_rdcache ;invalidate any cached read data
+         wait                ;make sure any Vdd/Vpp changes done settling
+
+         skip_nflag 24h
+         jump    h24
+;
+;   This is 30F part.
+;
+         mcall   inst_nop    ;NOP
+         mcall   inst_nop    ;NOP
+         inst    h'040100'   ;GOTO 100h
+         mcall   inst_nop    ;second word of GOTO
+         jump    res_com     ;back to common reset code
+;
+;   This is a 24F, 24H, 33F, 24EP, or 33EP part.  FLAG_24H is set.  FLAG_33E is
+;   only set for 24EP and 33EP.
+;
+h24      unbank
+         loadk32 reg0, 0
+         loadk8  reg8, 5
+         gcall   sert_send   ;5 extra clocks needed after reset
+         mcall   inst_nop    ;mandatory initial NOP instruction
+
+         mcall   nop_ep      ;extra NOPs required by EP series parts
+         mcall   nop_ep
+
+         inst    h'040200'   ;GOTO 200h
+         mcall   inst_nop    ;second word of GOTO
+         mcall   inst_nop    ;NOP
+
+         mcall   nop_ep      ;extra NOPs required by EP series parts
+         mcall   nop_ep
+;
+;   Common code after sections specific to the dsPIC type.
+;
+res_com  unbank
+         dbankif lbankadr
+         setf    cntpc       ;leave maximum time before reset PC to start of memory
+         mcall   load_wdef   ;load assumed values into target registers
+         gjump   done_reset
+
+;*******************************************************************************
+;
+;   Subroutine F30_RDBLOCK
+;
+;   Read the block of 4 addresses (2 program words) from the program memory
+;   block that TADR is contained in.  The two low bits of TADR are irrelevant.
+;
+;   The data is written to RD0 and RD1.  RDADR is set to the start address of
+;   the data in the cache, and FLAG_RDCACHE is set to indicate the cached data
+;   in RD0,RD1 is valid.
+;
+;   The target chip address and TADRI will be updated to the next block of 4
+;   addresses within the same block of 64k addresses.  Put another way, the low
+;   16 bits of the target address will be incremented, but the high bits left
+;   unaltered.
+;
+         glbsub  f30_rdblock, regf0 | regf1
+
+         dbankif gbankadr
+         movf    tadr+0, w   ;get low byte of desired address
+         movwf   reg0        ;save it
+         andlw   b'11111100' ;force it to block start boundary
+         movwf   tadr+0
+         dbankif lbankadr
+         movwf   rdadr+0     ;set low byte of cached block address
+         movff   tadr+1, rdadr+1 ;set upper bytes of cached block address
+         movff   tadr+2, rdadr+2
+
+         mcall   f30_setadr  ;make sure target address set to block start
+         movff   reg0, tadr+0 ;restore original desired address low byte
+;
+;   The target address is set for the beginning of the block of 2 words
+;   (4 addresses).
+;
+         inst    h'BADB9D'   ;tblrdh.b [w13], [w7++]
+         mcall   inst_nop
+         mcall   inst_nop
+         mcall   nop3_ep
+
+         inst    h'BA00BD'   ;tblrdl [w13++], w1
+         mcall   inst_nop
+         mcall   inst_nop
+         mcall   nop3_ep
+
+         inst    h'BAD39D'   ;tblrdh.b [w13], [w7--]
+         mcall   inst_nop
+         mcall   inst_nop
+         mcall   nop3_ep
+
+         inst    h'BA013D'   ;tblrdl [w13++], w2
+         mcall   inst_nop
+         mcall   inst_nop
+         mcall   nop3_ep
+
+         lfsr    0, adr_visi ;move w1, Visi
+         mcall   store_w1
+         mcall   visi        ;read back W1
+         movff   reg0, rd0+0
+         movff   reg1, rd0+1
+
+         lfsr    0, adr_visi ;move w1, Visi
+         mcall   store_w2
+         mcall   visi        ;read back W2
+         movff   reg0, rd1+0
+         movff   reg1, rd1+1
+
+         lfsr    0, adr_visi ;move w5, Visi
+         mcall   store_w5
+         mcall   visi        ;read back W5
+         movff   reg0, rd0+2
+         movff   reg1, rd1+2
+;
+;   The data has been read and is in RD0 and RD1.
+;
+         dbankif gbankadr
+         movf    tadri+0, w  ;get local copy of target address low byte
+         addlw   4           ;update to new target address
+         movwf   tadri+0
+         movlw   0
+         addwfc  tadri+1     ;propagate carry to next byte
+         bsf     flag_rdcache ;indicate the cache contains valid data
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine F30_GETCACHE
+;
+;   Return the two cached words read from program memory.  This routine
+;   does no checking and just returns the data.  It is the caller's
+;   responsibility to verify that the cache is valid and to know the
+;   address of the cached data.
+;
+;   The first word is returned in REG2:REG1:REG0, and the second in
+;   REG5:REG4:REG3.
+;
+         glbsub  f30_getcache, noregs
+
+         movff   rd0+0, reg0
+         movff   rd0+1, reg1
+         movff   rd0+2, reg2
+
+         movff   rd1+0, reg3
+         movff   rd1+1, reg4
+         movff   rd1+2, reg5
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Routine F30_READ
+;
+;   Read the target chip data at address TADR.  The data is returned in the
+;   low bits of REG1:REG0 with unused high bits set to 0.  This routine
+;   must jump to DONE_READ when done.  REG2-REG3, REG8 may be trashed.
+;
+         glbent  f30_read
+
+         dbankif gbankadr
+         btfsc   flag_spdata ;read from program memory space ?
+         jump    rdatasp     ;read from data memory space
+
+;**********
+;
+;   Reading from program memory space.
+;
+;   Check for the requested data is in the read cache.
+;
+         dbankif gbankadr
+         btfss   flag_rdcache ;the read cache is valid ?
+         bra     updcache    ;no
+
+         movf    tadr+0, w   ;get low desired address byte
+         andlw   b'11111100' ;make start of block containing address
+         movwf   reg0
+         dbankif lbankadr
+         xorwf   rdadr+0, w  ;compare to cached address low byte
+         bnz     updcache    ;addresses don't match ?
+
+         dbankif gbankadr
+         movf    tadr+1, w
+         dbankif lbankadr
+         xorwf   rdadr+1, w  ;compare middle address bytes ?
+         bnz     updcache    ;mismatch ?
+
+         dbankif gbankadr
+         movf    tadr+2, w
+         dbankif lbankadr
+         xorwf   rdadr+2, w  ;compare high address bytes ?
+         bz      getcache    ;cache is valid, go read data from cache ?
+;
+;   The cached read data is not valid.  Update the cache to include the
+;   data at the requested address.
+;
+updcache unbank              ;update the cache for the requested address
+         mcall   f30_rdblock ;read this block into the cache
+;
+;   The cached read data is valid and contains the desired address.
+;
+getcache unbank              ;get the data from the cache
+         dbankif gbankadr
+         movf    tadr+0, w   ;get desired address low byte
+         andlw   b'00000011' ;mask in address offset within the block
+         lfsr    0, rd0+1    ;init pointer to first word
+         btfsc   wreg, 1     ;address really is for first word ?
+         lfsr    0, rd1+1    ;no, load pointer to second word
+         ;
+         ;   FSR0 is pointing to the middle byte of the addressed 24 bit word.
+         ;
+         btfsc   wreg, 0     ;address is for low 16 bits of word ?
+         jump    rdhigh      ;address is for high 8 bits of the word
+         ;
+         ;   Get the low 16 bits of the 24 bit word.
+         ;
+         movff   postdec0, reg1 ;get middle byte
+         movff   indf0, reg0 ;get low byte
+         jump    rddone
+         ;
+         ;   Get the high 8 bits of the 24 bit word.
+         ;
+rdhigh   unbank
+         movff   preinc0, reg0 ;get high byte
+         clrf    reg1        ;there is no higher byte
+         jump    rddone
+
+;**********
+;
+;   Data memory space is currently selected.
+;
+rdatasp  unbank
+         mcall   f30_setadr  ;make sure target chip address set for this access
+
+         dbankif gbankadr
+         incf    tadr+0, w   ;update cached copy of target chip address
+         movwf   tadri+0
+         movlw   0
+         addwfc  tadr+1, w
+         andlw   h'0F'       ;force address into 0-FFF range
+         movwf   tadri+1
+         clrf    tadri+2
+
+         inst    h'BA00BD'   ;tblrdl [w13++], w1
+         mcall   inst_nop
+         mcall   inst_nop
+         mcall   nop3_ep
+
+         lfsr    0, adr_visi ;move w1, Visi
+         mcall   store_w1
+         mcall   visi        ;get the data word into REG1:REG0
+
+rddone   unbank              ;the return data is in REG1:REG0
+         gjump   done_read
+
+;*******************************************************************************
+;
+;   Local subroutine F30_33EPW2
+;
+;   Perform the 2-word write of a 24/33 EP series.  This routine assumes the
+;   write buffer is 2 words (4 addresses) long.  The current address will be
+;   updated to immediately after the two words.  The low 16 bits of the address
+;   in the target will be advanced by 4 also.
+;
+;   The data for the two instruction words has been loaded into the target
+;   registers:
+;
+;     W1  -  Word 0, low 16 bits
+;
+;     W2  -  Word 1, low 16 bits
+;
+;     W5  -  (word 1 high byte):(word 0 high byte)
+;
+;   This routine is allowed to trash the REGn general registers.
+;
+         locsub  f30_33epw2, noregs
+;
+;   Set the write address.  On this parts, writes are done to write latches at
+;   the fixed address of FA0000h.  The high bits of this address are loaded
+;   into TBLPAG, and W0 will be used to supply the low 16 bits of the address
+;   during a TBLWT.
+;
+         loadk16 reg0, h'00FA' ;mov #0x00FA, w0
+         mcall   load_w0
+         lfsr    0, adr_tblpag ;mov w0, Tblpag
+         mcall   store_w0
+
+         loadk16 reg0, 0     ;move #0, w0
+         mcall   load_w0
+;
+;   Write to the write latches.  W7 is pointing to W5.
+;
+         mcall   inst_nop
+         inst    h'BBC837'   ;tblwth.b [w7++], [w0]
+         mcall   inst_nop
+         mcall   inst_nop
+         inst    h'BB1801'   ;tblwtl w1, [w0++]
+         mcall   inst_nop
+         mcall   inst_nop
+         inst    h'BBC827'   ;tblwth.b [w7--], [w0]
+         mcall   inst_nop
+         mcall   inst_nop
+         inst    h'BB1802'   ;tblwtl w2, [w0++]
+         mcall   inst_nop
+         mcall   inst_nop
+;
+;   Set W0 and VISI both to FFFFh.  The write is detected completed by reading
+;   the NVMCOM register and looking for the WR bit cleared and other bits set as
+;   expected.  While the write is still in progress, copying the NVMCOM register
+;   into W0 then copying W0 to VISI does not work correctly.  The values seeded
+;   into W0 and VISI here are interpreted as write not completed yet.  Therefore
+;   the write will not be considered completed until moving data from NVMCOM to
+;   W0 to VISI works, and that data indicates the write has completed.
+;
+         loadk16 reg0, h'FFFF' ;mov #0xFFFF, w0
+         mcall   load_w0
+         lfsr    0, adr_visi ;mov w0, Visi
+         mcall   store_w0
+;
+;   Start the write.
+;
+         lfsr    0, adr_nvmadr ;mov w13, Nvmadr ;load write adr into NVMADRU:NVMADR
+         mcall   store_w13
+         lfsr    0, adr_nvmadru ;mov w14, Nvmadru
+         mcall   store_w14
+
+         lfsr    0, adr_nvmcon ;mov w10, Nvmcon ;select write to prog mem function
+         mcall   store_w10
+         mcall   inst_nop
+         mcall   inst_nop
+
+         lfsr    0, adr_nvmkey ;mov w11, Nvmkey
+         mcall   store_w11
+         mcall   inst_nop
+         lfsr    0, adr_nvmkey ;mov w12, Nvmkey
+         mcall   store_w12
+         inst    h'A8E729'   ;bset Nvmcon, #Wr
+
+         mcall   inst_nop    ;mandatory NOPs after write start
+         mcall   inst_nop
+         mcall   inst_nop
+         mcall   inst_nop
+         mcall   inst_nop
+;
+;   Start timer 1 to time the fixed-time part of the write.  Timer is set up to
+;   overflow and TMR1IF set when this time elapses.  TPROGF contains the number
+;   of instruction cycles to wait.  The timer is initialized to 65536-TPROGF so
+;   that it will roll over and set TMR1IF in TPROGF cycles.  Since only the low
+;   16 bits are used, this is the same as 0-TPROGF.  Some instruction cycles are
+;   used to set up the timer, which add to the total wait time.  These cycles
+;   are subtracted from the wait time by actually computing N-TPROGF, where N is
+;   the number of setup cycles before the wait actually starts.
+;
+         dbankif t1con
+         clrf    t1con       ;make sure timer 1 is off
+
+         dbankif gbankadr
+         loadk16 reg0, 15    ;timer setup cycles to subtract from wait
+         movf    tprogf+0, w
+         subwf   reg0        ;make timer start value low byte
+         movf    tprogf+1, w
+         subwfb  reg1        ;make timer start value high byte
+         bc      epw2_nw     ;no time left to wait, set to complete immediately
+         setf    reg0
+         setf    reg1
+epw2_nw
+         movff   reg1, tmr1h
+         movff   reg0, tmr1l
+
+         dbankif pir1
+         bcf     pir1, tmr1if ;clear overflowed flag
+         dbankif t1con
+         bsf     t1con, tmr1on ;start the timer
+;
+;   Update the local addresses.
+;
+         dbankif gbankadr
+         movlw   4
+         addwf   tadri+0     ;add 4 to low 16 bits of assumed target address
+         movlw   0
+         addwfc  tadri+1
+
+         dbankif gbankadr
+         movlw   4
+         addwf   tadr+0      ;add 4 to the current address
+         movlw   0
+         addwfc  tadr+1
+         addwfc  tadr+2
+;
+;   Wait for the timed part of the write to elapse.  Timer 1 was started so that
+;   it will overflow when this occurs.
+;
+epw2_wait1 unbank            ;wait for write time to elapse
+         dbankif pir1
+         btfss   pir1, tmr1if
+         jump    epw2_wait1
+;
+;   Check for write completed by reading the NVMCON register.  This section
+;   keeps reading the register until its value is found to be:
+;
+;     0xxx 0000 0000 xxxx
+;
+epw2_wait2 unbank            ;back here until write completed
+         mcall   inst_nop
+         lfsr    0, adr_nvmcon ;mov Nvmcon, w0
+         mcall   ram_w0
+         mcall   inst_nop
+
+         lfsr    0, adr_visi ;mov w0, Visi
+         mcall   store_w0
+         mcall   visi        ;get VISI contents into REG1:REG0
+
+         movlw   h'F0'
+         andwf   reg0
+         movlw   h'8F'
+         andwf   reg1, w
+         iorwf   reg0, w
+         bnz     epw2_wait2  ;not right NVMCOM value yet, back and check again ?
+;
+;   Update the address in the target.
+;
+         inst    h'B0004D'   ;add #4, w13
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Local subroutine F30PGMW
+;
+;   Perform an actual write cycle.  All the data latches, address, and NVMCON
+;   operation value must already be set.
+;
+;   WARNING:  Trashes REG0 - REG2.
+;
+         locsub  f30pgmw, noregs
+
+         mcall   f30_noint15 ;make sure NVMKEY unlock is not interrupted
+
+         dbankif gbankadr
+         bcf     flag_rdcache ;invalidate any cached read data
+         btfsc   flag_24h
+         jump    no_unlock   ;24H and 33F don't need unlock sequence
+         inst    h'883B3B'   ;mov w11, Nvmkey (55h)
+         inst    h'883B3C'   ;mov w12, Nvmkey (AAh)
+no_unlock unbank
+
+         inst    h'A8E761'   ;bset Nvmcon, #Wr (start the write)
+         mcall   inst_nop
+         mcall   inst_nop
+         mcall   inst_nop
+         mcall   inst_nop
+         dbankif gbankadr
+         movf    tprog, w    ;set wait time to programming write time
+         movwf   nextwait+0
+         clrf    nextwait+1
+         clrf    nextwait+2
+         wait                ;wait for the write programming time
+
+         dbankif gbankadr
+         btfsc   flag_24h
+         jump    wrfin24h
+;
+;   Finish write for 30F.  This means manually clearing the WR bit and
+;   executing a few NOPs.
+;
+         inst    h'A9E761'   ;bclr Nvmcon, #Wr (end the write)
+         mcall   inst_nop
+         mcall   inst_nop
+         jump    pgm_leave
+;
+;   Finish write for 24H and 33F.  This means polling NVMCON until the
+;   WR bit (bit 15) is clear.
+;
+wrfin24h unbank
+pollwr24h unbank             ;back here each new time to check WR bit
+         mcall   inst_nop
+         inst    h'803B00'   ;mov Nvmcon, w0
+         inst    h'883C20'   ;mov w0, Visi
+         mcall   inst_nop
+         mcall   visi        ;get NVMCON value into REG1:REG0
+         btfsc   reg1, 7     ;WR bit got cleared ?
+         jump    pollwr24h   ;no, go back and check it again
+
+pgm_leave unbank
+         leaverest
+
+;*******************************************************************************
+;
+;   Routine F30_WRITE
+;
+;   Write the data in REG1,REG0 to the target chip at address TADR.  This
+;   routine must jump to DONE_WRITE when done.  REG0-REG3, REG8 may be trashed.
+;
+;   Since this firmware implements the W30PGM command, this routine does not
+;   need to write to ordinary program memory.  This leaves only the
+;   configuration words and data memory.
+;
+         glbent  f30_write
+
+         dbankif gbankadr
+         bcf     flag_rdcache ;invalidate any cached read data
+         btfsc   flag_spdata ;writing to program memory space ?
+         jump    wdatsp      ;writing to data memory space
+
+;**********
+;
+;   Program memory space is currently selected.  We can assume that a
+;   configuration word is being written because the W30PGM command
+;   handles all writes to normal program memory.
+;
+         dbankif gbankadr
+         btfsc   tadr+0, 0   ;the address is even ?
+         jump    wleave      ;configuration words are only at even addresses
+
+         dbankif gbankadr
+         clrf    tadri+2     ;force reload of target chip address
+         mcall   f30_setadr  ;make sure target chip is at desired address
+         mcall   load_w0     ;write the data value to W0
+         inst    h'883B08'   ;mov w8, Nvmcon (setup for single config word write)
+         inst    h'BB1E80'   ;tblwtl w0, [w13++]
+         mcall   inst_nop
+         mcall   inst_nop
+         mcall   f30pgmw     ;do the actual write cycle
+
+         dbankif gbankadr
+         movlw   2           ;update local copy of target chip address
+         addwf   tadri+0
+         movlw   0
+         addwfc  tadri+1
+         jump    wleave
+
+;**********
+;
+;   Data memory space is currently selected.
+;
+wdatsp   unbank
+         mcall   f30_setadr  ;make sure target chip is at desired address
+         mcall   load_w0     ;write the data value to W0
+         inst    h'883B09'   ;mov w9, Nvmcon (setup for single data word write)
+         inst    h'BB1E80'   ;tblwtl w0, [w13++]
+         mcall   inst_nop
+         mcall   inst_nop
+         mcall   f30pgmw     ;do the actual write cycle
+
+         dbankif gbankadr
+         movlw   1           ;update local copy of target chip address
+         addwf   tadri+0
+         movlw   0
+         addwfc  tadri+1
+
+wleave   unbank              ;common exit point
+         gjump   done_write
+
+;*******************************************************************************
+;
+;   Subroutines used to write to program memory.  These are really part of
+;   the W30PGM command.  Subroutines F30_PGMW0, F30_PGMW1, F30_PGMW2, and
+;   F30_PGMW3 are called by the W30PGM command routine in that order for
+;   each of the 4 program memory words passed to the command.  Each subroutine
+;   is called with the 24 bit program memory word in REG0:REG2:REG1.
+;
+;   Each of these subroutines may trash all general registers.  The caller
+;   must preserve REG3 from the call to F30_PGMW0 to F30_PGMW3.
+;
+;**********
+;
+;   Subroutine F30_PGMW0
+;
+;   Make sure the address in the target chip is set, then save the word
+;   into the target registers.  The low 16 bits of the word are written
+;   to target register W1.  The high 8 bits are saved locally in REG3.
+;
+         glbsub  f30_pgmw0, noregs
+
+         mcall   f30_setadr  ;make sure target address is set as desired
+;
+;   Handle this instruction word.
+;
+         movff   reg0, reg3  ;save high byte of instruction word for next time
+         movff   reg1, reg0  ;load low 16 bits of instruction word into W1
+         movff   reg2, reg1
+         mcall   load_w1
+
+         skip_nflag 33ep
+         jump    done_pgmsetup ;24/33 EP, just store data now, setup done later
+;
+;   If this is the first instruction in its write block, then perform some extra
+;   setup done only once per block.
+;
+         dbankif gbankadr
+         decf    wbufsz, w   ;get mask for offset into write block
+         andwf   tadr+0, w   ;make offset into write block for starting address
+         bnz     done_pgmsetup ;not start of a write block, skip setup ?
+         ;
+         ;   Do the once per write block setup.
+         ;
+         lfsr    0, adr_tblpag ;mov w14, Tblpag
+         mcall   store_w14
+         mcall   inst_nop
+         mcall   inst_nop
+
+done_pgmsetup unbank         ;done with setup performed once per write block
+         leaverest
+
+;**********
+;
+;   Subroutine F30_PGMW1
+;
+;   Write the high byte of the previous instruction word and the new
+;   instruction word to the target registers, then execute the TBLWRT
+;   instructions to write both instruction words to their write latches.
+;
+         glbsub  f30_pgmw1, noregs
+
+         movff   reg0, reg4  ;temp save high byte in REG4
+
+         movff   reg1, reg0  ;load low 16 bits of new instruction into W2
+         movff   reg2, reg1
+         mcall   load_w2
+
+         movff   reg3, reg0  ;high byte of first instruction word
+         movff   reg4, reg1  ;high byte of second instruction word
+         mcall   load_w5
+
+         skip_nflag 33ep     ;not a 24/33 EP part ?
+         jump    f30_33epw2  ;do 24/33 EP special 2-word write, return to caller
+
+         inst    h'BBCEB7'   ;tblwth.b [w7++], [w13]
+         mcall   inst_nop
+         mcall   inst_nop
+         inst    h'BB1E81'   ;tblwtl   w1, [w13++]
+         mcall   inst_nop
+         mcall   inst_nop
+         inst    h'BBCEA7'   ;tblwth.b [w7--], [w13]
+         mcall   inst_nop
+         mcall   inst_nop
+         inst    h'BB1E82'   ;tblwtl   w2, [w13++]
+         mcall   inst_nop
+         mcall   inst_nop
+
+         leaverest
+
+;**********
+;
+;   Subroutine F30_PGMW2
+;
+;   Write the low 16 bits of this instruction word to W1.  The high 8 bits
+;   are saved in REG3.
+;
+         glbsub  f30_pgmw2, noregs
+
+         movff   reg0, reg3  ;save high byte of instruction word for next time
+         movff   reg1, reg0  ;load low 16 bits of instruction word into W1
+         movff   reg2, reg1
+         mcall   load_w1
+
+         leaverest
+
+;**********
+;
+;   Subroutine F30_PGMW3
+;
+;   Write the new instruction word and the high byte of the previous instruction
+;   word (was saved in REG3) to the target chip registers, then write both
+;   instruction words to their write latches.
+;
+;   TADR and TADRI are updated.
+;
+;   If this is the last instruction word in its write block, then the real write
+;   is performed.  This writes all the instruction words of the write block from
+;   their write latches to the actual program memory.
+;
+         glbsub  f30_pgmw3, noregs
+
+         skip_nflag 33ep
+         jump    f30_pgmw1   ;24/33 EP only write 2 words at a time
+
+         movff   reg0, reg4  ;temp save high byte in REG4
+
+         movff   reg1, reg0  ;load low 16 bits of new instruction into W2
+         movff   reg2, reg1
+         mcall   load_w2
+
+         movff   reg3, reg0  ;high byte of first instruction word
+         movff   reg4, reg1  ;high byte of second instruction word
+         mcall   load_w5
+
+         inst    h'BBCEB7'   ;tblwth.b [w7++], [w13]
+         mcall   inst_nop
+         mcall   inst_nop
+         inst    h'BB1E81'   ;tblwtl   w1, [w13++]
+         mcall   inst_nop
+         mcall   inst_nop
+         inst    h'BBCEA7'   ;tblwth.b [w7--], [w13]
+         mcall   inst_nop
+         mcall   inst_nop
+         inst    h'BB1E82'   ;tblwtl   w2, [w13++]
+         mcall   inst_nop
+         mcall   inst_nop
+;
+;   Update the desired and actual target addresses for the entire W30PGM
+;   command.  The desired address is incremented by 8 to account for the
+;   4 instruction words passed to the command.  This address was previously
+;   forced to a multiple of 8.
+;
+;   Only the low 16 bits of the actual target address are updated in the
+;   process of writing to the latches.  This is because only W13 is updated,
+;   and W14 and TBLPAG are not altered.  To properly reflect this, only the
+;   low 16 bits of TADRI are incremented by 8.  If the real address increment
+;   carries into the upper 8 bits, then this will be detected as an address
+;   mismatch, which causes W14:W13 and TBLPAG to be automatically reloaded.
+;
+         dbankif gbankadr
+         movlw   8           ;amount to add to desired address
+         addwf   tadr+0
+         movlw   0
+         addwfc  tadr+1
+         addwfc  tadr+2
+
+         dbankif gbankadr
+         movlw   8           ;amount to add to cached target address
+         addwf   tadri+0
+         movlw   0
+         addwfc  tadri+1
+;
+;   Peform the actual write if the instruction word of this call was the last in
+;   its write block.  Since the address has already been incremented, it would
+;   now be at the start of the next block.
+;
+         dbankif gbankadr
+         decf    wbufsz, w   ;get mask for address offset into write block
+         andwf   tadr+0, w   ;make offset of new address into write block
+         bnz     pgm_dw      ;not at start of new block now, skip write ?
+
+         lfsr    0, adr_nvmcon ;mov w10, Nvmcon (set code for writing to prog mem)
+         mcall   store_w10
+         mcall   f30pgmw     ;do the actual write cycle
+
+pgm_dw   unbank              ;all done with write, if any
+
+         leaverest

@@ -1,0 +1,333 @@
+;   ****************************************************************
+;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com).     *
+;   * All rights reserved except as explicitly noted here.         *
+;   *                                                              *
+;   * Permission to copy this file is granted as long as this      *
+;   * copyright notice is included in its entirety at the          *
+;   * beginning of the file, whether the file is copied in whole   *
+;   * or in part and regardless of whether other information is    *
+;   * added to the copy, and one of the following conditions is    *
+;   * met:                                                         *
+;   *                                                              *
+;   *   1 - Any executable derived from the this file is only run  *
+;   *       on a Embed Inc product.                                *
+;   *                                                              *
+;   *   2 - Any device that contains executable code derived from  *
+;   *       this file is not sold, not distributed for commercial  *
+;   *       advantage, and not more than 10 (ten) instances of the *
+;   *       device are created.                                    *
+;   *                                                              *
+;   * To copy this file otherwise requires explicit permission     *
+;   * from Embed Inc and may also require a fee.                   *
+;   *                                                              *
+;   * The information in this file is provided "as is".  Embed Inc *
+;   * makes no claims of suitability for any particular purpose    *
+;   * nor assumes any liability resulting from its use.            *
+;   ****************************************************************
+;
+;   Include file that implements the common parts of the F16E module within
+;   various PIC programmer firmware types.  This module handles the enhanced 16F
+;   target PICs, which generally seem to have 4 digit module numbers.  These
+;   have a somewhat different memory architecture than the original PIC 16.
+;
+;   The program memory address space seems to be (addresses in HEX):
+;
+;     0000 - 7FFF   Program memory
+;     8000 - FFFF   Configration space
+;
+         extern  done_read   ;jump here when specific read routine done
+         extern  done_write  ;jump here when specific write routine done
+
+         extern  tadr        ;requested target chip address of operation
+         extern  tadri       ;actual internal target chip address
+         extern  nextwait    ;length of wait to set up on call to WAIT_START
+         extern  wbufsz      ;target chip write buffer size
+         extern  wbufen      ;last address covered by write buffer
+         extern_flags        ;declare global flag bits EXTERN
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+/const   iprogms real = 5    ;ms to wait for internally time program to complete
+/const   endms   real = 0.100 ;ms to wait after explicit END PROGRAM command
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+cmd_prog res     1           ;opcode to start programming
+cmd_end  res     1           ;opcode to end programming, when FLAG_OP1 set
+
+
+.f16e    code
+
+;*******************************************************************************
+;
+;   Local subroutine SET_ADR
+;
+;   Set the internal target chip address to match the desired address.  The
+;   desired address is in TADR and the current address internal to the target
+;   chip is TADRI.  These parts implement a 16 bit address space, so only the
+;   low 2 bytes of TADR and TADRI and used.  Any remaining higher address bytes
+;   should be set to 0, but are ignored by this routine.
+;
+         locsub  set_adr, regf0 | regf1
+;
+;   Check for reasons to reset the address to 0.
+;
+         ;
+         ;   Check for target address is unknown.
+         ;
+         dbankif gbankadr
+         btfss   flag_tadrkn ;the target address is known ?
+         jump    sa_reset    ;no, go reset it to a known state
+         ;
+         ;   Check for target address is past the desired address.  The address
+         ;   can only be incremented, not decremented.  The only way to decrease
+         ;   the address is to reset it to 0.
+         ;
+         dbankif gbankadr
+         movf    tadri+1, w  ;get current address high byte
+         subwf   tadr+1, w   ;compare to desired address high byte
+         skip_wle            ;high byte at or before desired address ?
+         jump    sa_reset    ;definitely past desired address, do the reset
+         skip_z              ;high byte compare inconclusive ?
+         jump    sa_dreset   ;definitely before desired address, skip the reset
+
+         movf    tadri+0, w  ;get current address low byte
+         subwf   tadr+0, w   ;compare to desired address low byte
+         skip_wgt            ;past desired address, need to do reset ?
+         jump    sa_dreset   ;no, skip the reset
+;
+;   Reset the target chip address to 0.  This is done by issuing the RESET
+;   ADDRESS command.
+;
+sa_reset dbankis gbankadr
+         loadk16 tadri, 0    ;set our copy of the target chip address
+         bsf     flag_tadrkn ;the target chip address is known and in TADRI
+
+         loadk8  reg0, 22    ;send RESET ADDRESS command
+         gcall   sert_send6
+         dbankif gbankadr
+
+sa_dreset dbankis gbankadr   ;skip here to avoid doing a reset
+;
+;   The current target chip address is known, and is less than or equal to
+;   the desired address.
+;
+;   Now check for the current address is in program memory and the desired
+;   address in configuration memory.  The program counter can't be incremented
+;   from program memory to configuration memory.  Configuration memory can only
+;   be entered with a LOAD CONFIGURATION command.
+;
+         dbankif gbankadr
+         btfss   tadr+1, 7   ;desired address is in config space ?
+         jump    sa_dconfig  ;no
+         btfsc   tadri+1, 7  ;current address is in program memory space ?
+         jump    sa_dconfig  ;no
+         ;
+         ;   Switch to configuration space.
+         ;
+         dbankif gbankadr
+         loadk16 tadri, h'8000' ;update local copy of target chip address
+
+         loadk8  reg0, 0     ;send LOAD CONFIGURATION opcode
+         gcall   sert_send6
+         loadk16 reg0, 0     ;send 0 data word with the command
+         gcall   sert_send14ss
+
+sa_dconfig unbank            ;skip to here to avoid switching to config adr range
+;
+;   The current address is less than or equal to the desired address, and is in
+;   the same address space.
+;
+;   Now increment the current address until it matches the desired address.
+;
+sa_loopinc unbank            ;back here after each address increment
+         dbankif gbankadr
+         movf    tadri+0, w  ;get current address low byte
+         xorwf   tadr+0, w   ;compare to desired address low byte
+         movwf   reg0        ;save result of low byte compare
+         movf    tadri+1, w  ;get current address high byte
+         xorwf   tadr+1, w   ;compare to desired address high byte
+         iorwf   reg0, w     ;merge with mismatch from low bytes
+         skip_nz             ;not currently at desired address ?
+         jump    sa_doneinc  ;current address = desired address, all done
+         ;
+         ;   The current and desired addresses don't match.  Increment
+         ;   the current address.
+         ;
+sa_doinc
+         loadk8  reg0, 6     ;send INCREMENT ADDRESS command
+         gcall   sert_send6
+         gcall   op_inc_tadri ;update our copy of the target chip current address
+         jump    sa_loopinc  ;back to compare addresses after the increment
+
+sa_doneinc unbank            ;done incrementing current address to match desired
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Routine F16E_READ
+;
+;   Read the target chip data at address TADR.  The data is returned in the low
+;   bits of REG1:REG0 with unused high bits set to 0.  This routine must jump to
+;   DONE_READ when done.  REG2-REG3, REG8 may be trashed.
+;
+         glbent  f16e_read
+
+         mcall   set_adr     ;make sure target chip is at the desired address
+
+         dbankif gbankadr
+         movlw   b'000100'   ;get READ DATA FROM PROGRAM MEMORY command
+         btfsc   flag_spdata ;really are in program memory space ?
+         movlw   b'000101'   ;no, get READ DATA FROM DATA MEMORY command
+         movwf   reg0
+         gcall   sert_send6  ;send it
+
+         gcall   sert_recv14ss ;get the 14 data bits into low bits of REG1,REG0
+
+         gjump   done_read
+
+;*******************************************************************************
+;
+;   Write Routines.  The selected write routine is jumped to from the dispatch
+;   code in the OP module when a write operation is requested.
+;
+;   The data to write is in REG1:REG0, and the address to write it to in TADR.
+;   This routine must jump to DONE_WRITE when done.  REG0-REG3, REG8 may be
+;   trashed.  NEXTWAIT has been initialized with the TPROG value and CNTWAIT is
+;   zero (no wait interval in progress).  The OPn flags have all been cleared
+;   by OP_WRITE before the specific write routine is called.
+;
+;*****************************
+;
+;   Internal routine WRITE_COMM
+;
+;   This is the common write routine jumped to by the other write routines after
+;   any customizing switches have been set.  The possible customizations are:
+;
+;     FLAG_OP1
+;       0: no command to end programming, timed only
+;       1: issued command to end programming after wait time
+;
+;     CMD_PROG  -  Start programming opcode.
+;
+;     CMD_END  -  End programming opcode.  Only meaningful when FLAG_OP1 set.
+;
+write_comm unbank
+         mcall   set_adr     ;make sure target chip is at the desired address
+;
+;   Write the data word to the target chip.  This may will only write it to the
+;   write buffer unless this is the last address in this write buffer window.
+;
+         movf    reg0, w     ;save original REG0 value in REG2
+         movwf   reg2
+         dbankif gbankadr
+         movlw   2           ;get LOAD DATA FOR PROGRAM MEMORY command
+         btfsc   flag_spdata ;really are in program memory space ?
+         movlw   3           ;get LOAD DATA FOR DATA MEMORY command
+         movwf   reg0
+         gcall   sert_send6  ;send the command
+         movf    reg2, w     ;restore the original data in REG0
+         movwf   reg0
+         gcall   sert_send14ss ;send the data word
+;
+;   Decide whether a write cycle must be performed now.  This section either
+;   jumps to DID_WRITE if not, or falls thru or jumps to DO_WRITE if a
+;   write needs to be performed now.
+;
+;   The write buffer size is assumed to be a power of 2.  It is set to 1 if
+;   the target has no write buffer.
+;
+         ;
+         ;   Check for data space.  Data space writes are always single words.
+         ;
+         dbankif gbankadr
+         btfsc   flag_spdata ;in program memory space ?
+         jump    do_write    ;no, data space always uses single word writes
+         ;
+         ;   Check for at the last offset of a write buffer footprint.
+         ;   a write is always performed in that case.  Note that a
+         ;   write will automatically be performed every word when the write
+         ;   buffer size is 1.
+         ;
+         dbankif gbankadr
+         decf    wbufsz, w   ;get mask for address offset into write buffer
+         movwf   reg0        ;save the mask
+         andwf   tadr+0, w   ;mask in the write buffer offset bits
+         xorwf   reg0, w     ;compare to the mask
+         skip_nz             ;no at last offset in write buffer ?
+         jump    do_write    ;at last word of write buffer, do the write now
+         ;
+         ;   Force a write now if the address is past the last address to
+         ;   which buffered writes apply.
+         ;
+         dbankif gbankadr
+         movf    tadr+1, w   ;get high byte of this address
+         subwf   wbufen+1, w ;compare to high byte of last write buffered address
+         skip_wle            ;could still be within write buffer range ?
+         jump    do_write    ;definitely past write buffer range
+         skip_z              ;high bytes equal, need to check low bytes ?
+         jump    did_write   ;definitely before end of write buffer coverage
+
+         movf    tadr+0, w   ;get low byte of this address
+         subwf   wbufen+0, w ;compare to low byte of last write buffered address
+         skip_wgt            ;past end of write buffer coverage ?
+         jump    did_write   ;no, don't do a write this word
+;
+;   Do a write cycle.
+;
+do_write unbank
+         movff   cmd_prog, reg0 ;send command to start the programming operation
+         gcall   sert_send6
+         start_wait_next     ;start the wait interval for this write
+         ;
+         ;   Send a command to end the programming if required.
+         ;
+         dbankif gbankadr
+         btfss   flag_op1    ;a end programming command is required ?
+         jump    did_write   ;no, skip this section
+
+         movff   cmd_end, reg0 ;get the command opcode
+         wait                ;wait the required write time
+         gcall   sert_send6  ;send the end programming command
+         startwait endms     ;set delay required before next operation
+
+did_write unbank             ;done performing write cycle, if any, for this word
+         gjump   done_write
+
+;*****************************
+;
+;   WRITE_16F182X
+;
+;   For the 16F182x.  We don't know where Microchip is going with this, so it
+;   may apply to other enhanced 16F subfamilies in the future.
+;
+         glbent  write_16f182x
+         ;
+         ;   Set up and do regular program memory write if that is what this is.
+         ;
+         dbankif lbankadr
+         loadk8  cmd_prog, 24 ;BEGIN EXTERNALLY TIMED PROGRAMMING
+         loadk8  cmd_end, 10 ;END EXTERNALLY TIMED PROGRAMMING
+         dbankif gbankadr
+         bsf     flag_op1    ;indicate end programming command required
+         btfsc   tadr+1, 7   ;in regular program memory region ?
+         jump    cfg182x     ;no, in config region
+         btfss   flag_spdata ;in data address space ?
+         jump    write_comm  ;in program memory address space
+         ;
+         ;   Not writing to regular program memory.
+         ;
+cfg182x
+         setwait iprogms     ;set wait time for internally timed programming
+         dbankif lbankadr
+         loadk8  cmd_prog, 8 ;BEGIN INTERNALLY TIMED PROGRAMMING
+         jump    write_comm
+
+         end

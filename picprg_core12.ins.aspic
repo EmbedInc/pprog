@@ -1,0 +1,227 @@
+;   ****************************************************************
+;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com).     *
+;   * All rights reserved except as explicitly noted here.         *
+;   *                                                              *
+;   * Permission to copy this file is granted as long as this      *
+;   * copyright notice is included in its entirety at the          *
+;   * beginning of the file, whether the file is copied in whole   *
+;   * or in part and regardless of whether other information is    *
+;   * added to the copy, and one of the following conditions is    *
+;   * met:                                                         *
+;   *                                                              *
+;   *   1 - Any executable derived from the this file is only run  *
+;   *       on a Embed Inc product.                                *
+;   *                                                              *
+;   *   2 - Any device that contains executable code derived from  *
+;   *       this file is not sold, not distributed for commercial  *
+;   *       advantage, and not more than 10 (ten) instances of the *
+;   *       device are created.                                    *
+;   *                                                              *
+;   * To copy this file otherwise requires explicit permission     *
+;   * from Embed Inc and may also require a fee.                   *
+;   *                                                              *
+;   * The information in this file is provided "as is".  Embed Inc *
+;   * makes no claims of suitability for any particular purpose    *
+;   * nor assumes any liability resulting from its use.            *
+;   ****************************************************************
+;
+;   Include file that implements the common parts of the CORE12
+;   module within various PIC programmer firmware types.  Each
+;   CORE12 module must still be customized to the particular project
+;   include file.  The common code that is project-independent
+;   is therefore included into the project-specific module using
+;   this include file.
+;
+         extern  done_adr    ;jump here when specified adr routine done
+         extern  done_read   ;jump here when specific read routine done
+         extern  done_write  ;jump here when specific write routine done
+
+         extern  tadr        ;requested target chip address of operation
+         extern  tadri       ;actual internal target chip address
+         extern  tadrr       ;target chip address after reset
+         extern  datadr      ;program memory address of data space start
+         extern  nextwait    ;clock ticks to set up next wait for
+         extern  tprog       ;wait time after write in timer 2 ticks
+         extern_flags        ;declare global flag bits EXTERN
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+.core12  code
+
+;*******************************************************************************
+;
+;   Local subroutine SET_ADR
+;
+;   Set the internal target chip address to match the desired address.  The
+;   desired address is in TADR and the current address internal to the target
+;   chip is TADRI.  TADRI is only valid (target address is known) if FLAG_TADRKN
+;   is set.  TADRR is the address the target chip will be set to on reset, and
+;   is the last address of the program memory space.
+;
+;   This version is for the 12 bit core, and only the two low bytes of TADR and
+;   TADRI are used.
+;
+         locsub  set_adr, regf0 | regf1 | regf2 | regf3
+;
+;   Compute the actual desired target program memory address in REG3:REG2.  This
+;   is the same as TADR when in program address space, but is TADR + DATADR when
+;   in data address space.
+;
+         movff   tadr+0, reg2 ;init desired internal address as TADR
+         movff   tadr+1, reg3
+
+         skip_flag spdata    ;the requested address is in data space ?
+         jump    sa_ndata    ;no, skip this section
+         dbankif gbankadr
+         movf    datadr+0, w ;add internal start address of data EEPROM
+         addwf   reg2
+         movf    datadr+1, w
+         addwfc  reg3
+sa_ndata unbank
+;
+;   Flag the address as unknown if the target is the reset address, and the
+;   target address has been incremented since reset.  The word at the reset
+;   address can only be accessed before any address increment.
+;
+         dbankif gbankadr
+         movf    reg2, w     ;compare target address to reset address
+         xorwf   tadrr+0, w
+         movwf   reg0
+         movf    reg3, w
+         xorwf   tadrr+1, w
+         iorwf   reg0
+         bnz     done_config ;desired address is not the reset address ?
+         ;
+         ;   The desired address is the reset address.
+         ;
+         btfsc   flag_adrinc ;target address not incremented since last reset ?
+         bcf     flag_tadrkn ;target incremented, invalidate address assumption
+
+done_config
+;
+;   Reset the target chip if its address is unknown.
+;
+         dbankif gbankadr
+         btfsc   flag_tadrkn ;target address is unknown ?
+         jump    sa_dreset   ;target address is known, skip the reset
+
+         wait
+         gcall   op_reset    ;reset the target chip, curr address becomes TADRR
+         wait
+sa_dreset                    ;skip to here to avoid the reset
+;
+;   Mask in only the valid bits of the desired address in TADR.  TADRR is the
+;   last valid address, and is a power of 2 minus 1 so is also the mask of
+;   valid address bits.
+;
+         dbankif gbankadr
+         movf    tadrr+0, w  ;mask byte 0
+         andwf   reg2
+         movf    tadrr+1, w  ;mask byte 1
+         andwf   reg3
+;
+;   Keep incrementing the target chip address until it reaches the desired
+;   address.
+;
+sa_loop  unbank
+         dbankif gbankadr
+         movf    tadri+0, w  ;compare the low bytes
+         xorwf   reg2, w
+         skip_z              ;match ?
+         jump    sa_inc      ;no, increment the address
+         movf    tadri+1, w  ;compare the high bytes
+         xorwf   reg3, w
+         skip_nz             ;different ?
+         jump    sa_leave    ;target is at desired address, all done
+         ;
+         ;   Increment the target address by one.
+         ;
+sa_inc   unbank
+         movlw   b'000110'   ;send INCREMENT ADDRESS command
+         movwf   reg0
+         gcall   sert_send6
+
+         gcall   op_inc_tadri ;update our assumed target address
+         dbankif gbankadr
+         movf    tadrr+0, w  ;mask in only valid bits of new assumed address
+         andwf   tadri+0
+         movf    tadrr+1, w
+         andwf   tadri+1
+         clrf    tadri+2
+
+         jump    sa_loop     ;back to check address again
+
+sa_leave unbank              ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
+;   Routine CORE12_ADR
+;
+;   Physically set the address in the target chip to TADR.  This routine must
+;   jump to DONE_ADR when done.  REG0-REG3 and REG8 may be trashed.
+;
+         glbent  core12_adr
+         mcall   set_adr
+         gjump   done_adr
+
+;*******************************************************************************
+;
+;   Routine CORE12_READ
+;
+;   Read the target chip data at address TADR.  The data is returned in the
+;   low bits of REG1,REG0 with unused high bits set to 0.  This routine
+;   must jump to DONE_READ when done.  REG2-REG3, REG8 may be trashed.
+;
+         glbent  core12_read
+
+         mcall   set_adr     ;make sure target is at the desired address
+
+         movlw   b'000100'   ;send READ DATA FROM PROGRAM MEMORY command
+         movwf   reg0
+         gcall   sert_send6
+         gcall   sert_recv14ss ;read the result into REG1:REG0
+
+         gjump   done_read
+
+;*******************************************************************************
+;
+;   Subroutine CORE12_WRITE
+;
+;   Write the data in REG1,REG0 to the target chip at address TADR.
+;   This routine must jump to DONE_WRITE when done.  REG0-REG3, REG8
+;   may be trashed.
+;
+         glbent  core12_write
+
+         mcall   set_adr     ;make sure target is at the desired address
+
+         movff   reg0, reg2  ;save low data byte in REG2
+         movlw   2           ;send LOAD DATA FOR PROGRAM MEMORY command
+         movwf   reg0
+         gcall   sert_send6
+         movff   reg2, reg0  ;restore low data byte into REG0
+         gcall   sert_send14ss ;send the data from REG1:REG0
+
+         movlw   8           ;send BEGIN PROGRAMMING command
+         movwf   reg0
+         gcall   sert_send6
+
+         dbankif gbankadr
+         movff   tprog, nextwait+0 ;set wait time in clock ticks
+         clrf    nextwait+1
+         gcall   wait_start  ;start the wait
+         gcall   wait_wait   ;wait for programming time elapsed
+
+         movlw   14          ;send END PROGRAMMING command
+         movwf   reg0
+         gcall   sert_send6
+         dbankif gbankadr
+         loadk16 nextwait, 2 ;guarantee wait of at least one clock tick interval
+         gcall   wait_start
+
+         gjump   done_write

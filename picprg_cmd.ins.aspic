@@ -1,0 +1,1690 @@
+;   ****************************************************************
+;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com).     *
+;   * All rights reserved except as explicitly noted here.         *
+;   *                                                              *
+;   * Permission to copy this file is granted as long as this      *
+;   * copyright notice is included in its entirety at the          *
+;   * beginning of the file, whether the file is copied in whole   *
+;   * or in part and regardless of whether other information is    *
+;   * added to the copy, and one of the following conditions is    *
+;   * met:                                                         *
+;   *                                                              *
+;   *   1 - Any executable derived from the this file is only run  *
+;   *       on a Embed Inc product.                                *
+;   *                                                              *
+;   *   2 - Any device that contains executable code derived from  *
+;   *       this file is not sold, not distributed for commercial  *
+;   *       advantage, and not more than 10 (ten) instances of the *
+;   *       device are created.                                    *
+;   *                                                              *
+;   * To copy this file otherwise requires explicit permission     *
+;   * from Embed Inc and may also require a fee.                   *
+;   *                                                              *
+;   * The information in this file is provided "as is".  Embed Inc *
+;   * makes no claims of suitability for any particular purpose    *
+;   * nor assumes any liability resulting from its use.            *
+;   ****************************************************************
+;
+;   Include file that implements the common parts of the CMD
+;   module within various PIC programmer firmware types.  Each
+;   CMD module must still be customized to the particular project
+;   include file.  The common code that is project-independent
+;   is therefore included into the project-specific module using
+;   this include file.
+;
+;   The following facilities must be defined by the module referencing this
+;   include file:
+;
+;     Macro COMMAND name
+;
+;       Must be first executable code of a command processing routine.  NAME is
+;       name of the command.
+;
+;     Macro GETBYTE
+;
+;       Get the next byte from the host into REG0.  Waits indefinitely until
+;       a byte is available.  Only REG1, REG2, REG3, REG8 are preserved.
+;
+;     Macro SENDBYTE
+;
+;       Send the byte in REG0 to the host.  Only REG1, REG2, REG3, REG8 are
+;       preserved.
+;
+;     Macro SENDK const
+;
+;       Send the 8 bit constant value CONST to the host.  Only REG1, REG2, REG3,
+;       REG8 are preserved.
+;
+;     Macro WAITDONE
+;
+;       Wait for any deliberate wait to be over.  Only REG1, REG2, REG3, REG8
+;       are preserved.
+;
+;     Macro PROM_ACQUIRE
+;
+;       Acquire exclusive access to the system non-volatile memory.  Only
+;       REG1, REG2, REG3, REG8 are preserved.
+;
+;     Macro PROM_RELEASE
+;
+;       Release the lock on exclusive access to the system non-volatile memory
+;       that was acquired with PROM_ACQUIRE.
+;
+;     Entry point CMD_DONE
+;
+;       Jump to this location when done executing each command.
+;
+;   Each command routine must have a common interface.  The command routine code
+;   must only be included in the build if the CM0xxx symbol is defined, where
+;   XXX is the name of the command.  The first executable code of a command must
+;   be the COMMAND macro invocation, and the command code must jump to CMD_DONE
+;   when done.  See the NOP command below as a example.
+;
+;*******************************************************************************
+;
+;   Command NOP
+;
+  ifdef cm0nop
+         command nop
+         goto    cmd_done
+    endif
+;
+;*******************************************************************************
+;
+;   Command OFF
+;
+  ifdef cm0off
+         command off
+
+         waitdone
+         gcall   op_off
+         goto    cmd_done
+    endif
+;
+;*******************************************************************************
+;
+;   Command PINS
+;
+  ifdef cm0pins
+         command pins
+
+         movlw   1
+         movwf   reg0
+         sendbyte
+         goto    cmd_done
+    endif
+;
+;*******************************************************************************
+;
+;   Commands for doing low level communication over the target clock and
+;   data lines.
+;
+;   Command SEND1 n data
+;
+  ifdef cm0send1
+         command send1
+         getbyte             ;get 0-N number of data bits
+
+         movf    reg0, w
+         andlw   7           ;force to valid value
+         addlw   1           ;make 1-N number of data bits
+         movwf   reg8        ;save in REG8
+         getbyte             ;get the data bits into REG0
+
+         waitdone            ;wait until done setting previous state
+         gcall   sert_send   ;send the data bits
+
+         goto    cmd_done
+    endif
+;
+;   Command SEND2 n data data
+;
+  ifdef cm0send2
+         command send2
+
+         getbyte             ;get 0-N number of data bits
+         movf    reg0, w
+         andlw   15          ;force to valid value
+         addlw   1           ;make 1-N number of data bits
+         movwf   reg8        ;save in REG8
+
+         getbyte             ;get the low data bits
+         movff   reg0, reg2
+         getbyte             ;get the high data bits
+         movff   reg0, reg1
+         movff   reg2, reg0
+
+         waitdone            ;wait until done setting previous state
+         gcall   sert_send   ;send the data bits
+
+         goto    cmd_done
+    endif
+;
+;   Command SEND3 n data data data
+;
+  ifdef cm0send3
+         command send3
+         getbyte             ;get 0-N number of data bits
+         movf    reg0, w
+         andlw   31          ;force to valid value for SERT_SEND
+         addlw   1           ;make 1-N number of data bits
+         movwf   reg8        ;save in REG8
+
+         getbyte             ;get the 24 data bits into the low bits of REGA
+         movff   reg0, reg3
+         getbyte
+         movff   reg0, reg1
+         getbyte
+         movff   reg0, reg2
+         movff   reg3, reg0
+         clrf    reg3
+
+         waitdone            ;wait until done setting previous state
+         gcall   sert_send   ;send the data bits
+
+         goto    cmd_done
+    endif
+;
+;   Command SEND4 n data data data data
+;
+  ifdef cm0send4
+         command send4
+         getbyte             ;get 0-N number of data bits
+         movf    reg0, w
+         andlw   31          ;force to valid value
+         addlw   1           ;make 1-N number of data bits
+         movwf   reg8        ;save in REG8
+
+         getbyte             ;get the 32 data bits into REGA
+         movff   reg0, reg3
+         getbyte
+         movff   reg0, reg1
+         getbyte
+         movff   reg0, reg2
+         getbyte
+         movff   reg0, reg4
+         movff   reg3, reg0
+         movff   reg4, reg3
+
+         waitdone            ;wait until done setting previous state
+         gcall   sert_send   ;send the data bits
+
+         goto    cmd_done
+    endif
+;
+;   Command RECV1 n
+;
+  ifdef cm0recv1
+         command recv1
+         getbyte             ;get number of bits to read
+         movf    reg0, w
+         andlw   7           ;force to valid value
+         addlw   1           ;make 1-N number of data bits
+         movwf   reg8        ;save in REG8
+
+         waitdone            ;wait until done setting previous state
+         gcall   sert_recv   ;read the data bits into REGA
+         sendbyte            ;send the received data bits
+
+         goto    cmd_done
+    endif
+;
+;   Command RECV2 n
+;
+  ifdef cm0recv2
+         command recv2
+         getbyte             ;get number of bits to read
+         movf    reg0, w
+         andlw   15          ;force to valid value
+         addlw   1           ;make 1-N number of data bits
+         movwf   reg8        ;save in REG8
+
+         waitdone            ;wait until done setting previous state
+         gcall   sert_recv   ;read the data bits into REGA
+         sendbyte            ;send the received data bits
+         movff   reg1, reg0
+         sendbyte
+
+         goto    cmd_done
+    endif
+;
+;   Command RECV3 n
+;
+  ifdef cm0recv3
+         command recv3
+         getbyte             ;get number of bits to read
+         movf    reg0, w
+         andlw   31          ;force to valid value for SERC_RECV
+         addlw   1           ;make 1-N number of data bits
+         movwf   reg8        ;save in REG8
+
+         waitdone            ;wait until done setting previous state
+         gcall   sert_recv   ;read the data bits into REGA
+         sendbyte            ;send the received data bits
+         movff   reg1, reg0
+         sendbyte
+         movff   reg2, reg0
+         sendbyte
+
+         goto    cmd_done
+    endif
+;
+;   Command RECV4 n
+;
+  ifdef cm0recv4
+         command recv4
+         getbyte             ;get number of bits to read
+         movf    reg0, w
+         andlw   31          ;force to valid value
+         addlw   1           ;make 1-N number of data bits
+         movwf   reg8        ;save in REG8
+
+         waitdone            ;wait until done setting previous state
+         gcall   sert_recv   ;read the data bits into REGA
+         sendbyte            ;send the received data bits
+         movff   reg1, reg0
+         sendbyte
+         movff   reg2, reg0
+         sendbyte
+         movff   reg3, reg0
+         sendbyte
+
+         goto    cmd_done
+    endif
+;
+;   Command CLKH
+;
+  ifdef cm0clkh
+         command clkh
+         waitdone
+         gcall   sert_clkh
+         goto    cmd_done
+    endif
+;
+;   Command CLKL
+;
+  ifdef cm0clkl
+         command clkl
+         waitdone
+         gcall   sert_clkl
+         goto    cmd_done
+    endif
+;
+;   Command DATH
+;
+  ifdef cm0dath
+         command dath
+         waitdone
+         gcall   sert_dath
+         goto    cmd_done
+    endif
+;
+;   Command DATL
+;
+  ifdef cm0datl
+         command datl
+         waitdone
+         gcall   sert_datl
+         goto    cmd_done
+    endif
+;
+;   Command DATR
+;
+  ifdef cm0datr
+         command datr
+         waitdone
+         gcall   sert_datr
+         sendbyte
+         goto    cmd_done
+    endif
+;
+;   Command TDRIVE
+;
+  ifdef cm0tdrive
+         command tdrive
+         waitdone
+         gcall   sert_test_tdrive
+         clrf    reg0        ;init to target not driving data line
+         dbankif gbankadr
+         btfsc   flag_tdrive ;target really isn't driving the data line ?
+         bsf     reg0, 0     ;indicate target is driving the data line
+         sendbyte
+         goto    cmd_done
+    endif
+;
+;*******************************************************************************
+;
+;   Command WAIT <I16 ticks>
+;
+  ifdef cm0wait
+         command wait
+         extern  nextwait
+
+         getbyte             ;get low byte
+         movff   reg0, reg1
+         getbyte             ;get high byte
+         waitdone
+
+         movff   reg1, nextwait+0
+         movff   reg0, nextwait+1
+         gcall   wait_start
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command FWINFO
+;
+  ifdef cm0fwinfo
+         command fwinfo
+
+         sendk   info_org    ;organization ID
+         sendk   info_cvlo   ;lowest version this firmware compatible with
+         sendk   info_cvhi   ;highest version this firmware compatible with
+         sendk   info_vers   ;firmware version
+         clrf    reg0        ;arbitrary 32 bit value
+         sendbyte
+         sendbyte
+         sendbyte
+         sendbyte
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command FWINFO2
+;
+;   Returns additional information about this firmware beyond that returned
+;   by the FWINFO command.
+;
+  ifdef cm0fwinfo2
+         command fwinfo2
+
+         movlw   info_fwid   ;get firmware ID
+         movwf   reg0        ;pass it
+         sendbyte            ;send it
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Commands that control Vdd
+;
+;   Command VDDVALS low norm high
+;
+  ifdef cm0vddvals
+         command vddvals
+         getbyte             ;get low level into REG0
+         movf    reg0, w
+         movwf   reg3        ;temp save it in REG3
+         getbyte             ;get normal level
+         movf    reg0, w
+         movwf   reg1        ;save it in REG1
+         getbyte             ;get high level
+         movf    reg0, w
+         movwf   reg2        ;save it in REG2
+         movf    reg3, w     ;get low level
+         movwf   reg0        ;pass it in reg0
+
+         mcall   waitready   ;wait until done setting previous state
+         gcall   vdd_setvals ;set the new low, normal, and high Vdd levels
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;  Command VDDLOW
+;
+  ifdef cm0vddlow
+         command vddlow
+         waitdone            ;wait until done setting previous state
+         gcall   vdd_low
+         goto    cmd_done
+    endif
+;
+;  Command VDDNORM
+;
+  ifdef cm0vddnorm
+         command vddnorm
+         waitdone            ;wait until done setting previous state
+         gcall   vdd_norm
+         goto    cmd_done
+    endif
+;
+;  Command VDDHIGH
+;
+  ifdef cm0vddhigh
+         command vddhigh
+         waitdone            ;wait until done setting previous state
+         gcall   vdd_high
+         goto    cmd_done
+    endif
+;
+;  Command VDDOFF
+;
+  ifdef cm0vddoff
+         command vddoff
+         waitdone            ;wait until done setting previous state
+         gcall   vdd_zero
+         goto    cmd_done
+    endif
+;
+;   Command VDD level
+;
+;   Set the Vdd voltage level for next time it is enabled.
+;
+  ifdef cm0vdd
+         command vdd
+         getbyte             ;get the 0-250 new level into REG0
+         gcall   vdd_setv    ;set new Vdd level for next time enabled
+         goto    cmd_done
+    endif
+;
+;*******************************************************************************
+;
+;   Commands that control Vpp
+;
+;   Command VPPON
+;
+  ifdef cm0vppon
+         command vppon
+
+         waitdone            ;wait until done setting previous state
+         gcall   vpp_on
+         goto    cmd_done
+    endif
+;
+;   Command VPPOFF
+;
+  ifdef cm0vppoff
+         command vppoff
+
+         waitdone            ;wait until done setting previous state
+         gcall   vpp_zero
+         goto    cmd_done
+    endif
+;
+;   Command VPPHIZ
+;
+  ifdef cm0vpphiz
+         command vpphiz
+
+         waitdone            ;wait until done setting previous state
+         gcall   vpp_off
+         goto    cmd_done
+    endif
+;
+;   Command VPP level
+;
+  ifdef cm0vpp
+         command vpp
+         getbyte
+
+         waitdone
+         gcall   vpp_setv
+         goto    cmd_done
+    endif
+
+;*******************************************************************************
+;
+;   Command IDRESET id
+;
+;   Set the algorithm ID for the RESET operation.
+;
+  ifdef cm0idreset
+         command idreset
+         extern  alg_reset
+
+         getbyte             ;get the ID in REG0
+         dbankif gbankadr
+         bcf     flag_offvddvpp ;init to Vpp then Vdd power off order
+         btfsc   reg0, 7     ;Vpp before Vdd power off specified ?
+         bsf     flag_offvddvpp ;no, indicate to use Vdd before Vdd power off order
+         bcf     reg0, 7     ;set REG0 to the reset algorithm ID
+
+         movf    reg0, w
+         movwf   alg_reset
+         clrf    tadrr+0     ;init the address after reset to 0
+         clrf    tadrr+1
+         clrf    tadrr+2
+
+         gcall   op_reset_def ;init reset state to default
+
+         goto    cmd_done    ;done processing this command
+    endif
+
+;*******************************************************************************
+;
+;   Command IDWRITE id
+;
+;   Set the algorithm ID for the WRITE operation.
+;
+  ifdef cm0idwrite
+         command idwrite
+         extern  alg_write, wbufsz
+
+         getbyte             ;get the ID in REG0
+
+         movff   reg0, alg_write
+         dbankif gbankadr
+         movlw   1
+         movwf   wbufsz      ;reset write buffer size to default
+
+         gcall   vdd_defaults ;reset Vdd settings to default values
+
+    ifdef cm0vpp             ;this programmer implements variable Vpp ?
+         waitdone
+         movlw   166         ;reset Vpp level to 13 volts when enabled
+         movwf   reg0
+         gcall   vpp_setv
+      endif
+
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command IDREAD id
+;
+;   Set the algorithm ID for the READ operation.
+;
+  ifdef cm0idread
+         command idread
+         extern  alg_read
+
+         getbyte             ;get the ID in REG0
+         movff   reg0, alg_read
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command RESADR <i24 address>
+;
+;   Set the target address that should be assumed when the target is reset.
+;
+  ifdef cm0resadr
+         command resadr
+         extern  tadrr
+
+         getbyte             ;address byte 0
+         movff   reg0, reg1
+         getbyte             ;address byte 1
+         movff   reg0, reg2
+         getbyte             ;address byte 2
+
+         movff   reg1, tadrr+0 ;set the address to assume after target reset
+         movff   reg2, tadrr+1
+         movff   reg0, tadrr+2
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command RESET
+;
+  ifdef cm0reset
+         command reset
+
+         dbankif gbankadr
+         bcf     flag_spdata ;reset to access program memory, not data space
+
+         waitdone            ;wait until done setting previous state
+         gcall   op_reset
+
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command ADR <i24 address>
+;
+;   Set the address for the next target operation.
+;
+  ifdef cm0adr
+         command adr
+         extern  tadr
+
+         getbyte             ;address byte 0
+         movff   reg0, reg1
+         getbyte             ;address byte 1
+         movff   reg0, reg2
+         getbyte             ;address byte 2
+
+         movff   reg1, tadr+0 ;set the desired address of next operation
+         movff   reg2, tadr+1
+         movff   reg0, tadr+2
+
+         gcall   op_adr      ;physically set the address in the target chip
+
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command INCADR
+;
+;   Increment the desired target address by 1.
+;
+  ifdef cm0incadr
+         command incadr
+
+         gcall   op_inc_tadr ;increment the address
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command ADRINV
+;
+;   Invalidate the local copy of the target address.  The target address
+;   will be deliberately set before the next operation that assumes
+;   an address.
+;
+  ifdef cm0adrinv
+         command adrinv
+
+         dbankif gbankadr
+         bcf     flag_tadrkn ;indicate target address is unknown
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command TPROG <time>
+;
+;   Sets the programming write cycle delay time in units of timer 2
+;   ticks.  These default to 200uS but can be a different value if the programmer
+;   implements the proper GETCAP subcommand to indicate the tick time.
+;
+  ifdef cm0tprog
+         command tprog
+         extern  tprog
+
+         getbyte             ;get the wait time in REG0
+         dbankif gbankadr
+         movf    reg0, w     ;set the new programming cycle wait time
+         movwf   tprog
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command SPPROG
+;
+;   Select the program memory space for subsequent read and write
+;   operations.
+;
+  ifdef cm0spprog
+         command spprog
+
+         dbankif gbankadr
+         btfss   flag_spdata ;in data space ?
+         goto    cmd_done    ;already in program space, nothing to do
+         bcf     flag_spdata ;indicate not in data memory space
+         jump    tadri_inv   ;invalidate cached copy of target chip address
+    endif
+;
+;*******************************************************************************
+;
+;   Command SPDATA
+;
+;   Select the data memory space for subsequent read and write
+;   operations.
+;
+  ifdef cm0spdata
+         command spdata
+
+         dbankif gbankadr
+         btfsc   flag_spdata ;in program space ?
+         goto    cmd_done    ;already in data space, nothing to do
+         bsf     flag_spdata ;indicate in data memory space
+
+tadri_inv unbank             ;jump here to invalidate cached target chip address
+         extern  tadr, tadri
+
+         dbankif gbankadr
+         comf    tadr+0, w
+         movwf   tadri+0
+         comf    tadr+1, w
+         movwf   tadri+1
+         comf    tadr+2, w
+         movwf   tadri+2
+         bcf     flag_tadrkn ;flag target address as unknown
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command WRITING
+;
+;   Indicate that the target is being written to.  This resets the
+;   write timeout counter to its maximum time, which causes FLAG_WRITE
+;   to be set, which in turn causes the status LED to indicate the
+;   target is being written to.
+;
+;   This is done automatically when higher level write commands are
+;   used.  However, low level commands (like SEND and RECV) can be
+;   used to write to the target.  The LED is not set to WRITING status
+;   by these commands since they can be used for other purposes.
+;   The WRITING command provides a means to set the LED to WRITING
+;   status explicitly.
+;
+  ifdef cm0writing
+         command writing
+
+         waitdone            ;wait until done setting previous state
+         gcall   led_writing ;indicate writing to the target chip
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command READ
+;   Ret: <i16 data>
+;
+;   Read from the target chip at the current address and increment
+;   the address.  Two bytes of data are always returned.  If the
+;   amount of data at one address is less than 16 bits, then the
+;   data is justified in the low bits and the unused high bits
+;   are set to 0.
+;
+  ifdef cm0read
+         command read
+
+         waitdone            ;wait until done setting previous state
+         gcall   op_read     ;read from current address into REG1,REG0
+         sendbyte            ;send the data to the host
+         movff   reg1, reg0
+         sendbyte
+         gcall   op_inc_tadr ;increment the desired address for next operation
+
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command RBYTE8
+;   Ret: <dat 0> ... <dat 7>
+;
+;   Read 8 consecutive words and return their low bytes.  The first byte
+;   will be read from the desired target address when the command
+;   is run.  The desired target address will be left at the next word
+;   after the last one that was read.
+;
+;   The purpose of this command is to provide a faster means of reading
+;   large memory areas when the target word size is 8 bits or less.
+;
+  ifdef cm0rbyte8
+         command rbyte8
+
+         waitdone            ;wait until done setting previous state
+;
+;   Register useage:
+;
+;     REG1,REG0  -  Word read from target.
+;
+;     REG2  -  Number of bytes left to send back
+;
+         movlw   8           ;init loop counter
+         movwf   reg2
+rb8_loop unbank              ;back here to read and send each new byte
+         gcall   op_read     ;read this word into REG1,REG0
+         sendbyte            ;send the low byte to the host
+         gcall   op_inc_tadr ;increment the desired target address by 1
+         decfsz  reg2        ;count one less byte left to do
+         jump    rb8_loop    ;back to read and send next byte
+
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command READ64
+;   Response: word0 ... word63
+;
+;   Read the 64 memory locations starting at the current address.  The address
+;   is advanced by 64.  The starting address must be a multiple of 64.
+;
+  ifdef cm0read64
+         command read64
+
+         waitdone            ;wait until done setting previous state
+;
+;   Register useage:
+;
+;     REG1,REG0  -  Word read from target.
+;
+;     REG2  -  Number of words left to send back
+;
+         movlw   64          ;init loop counter
+         movwf   reg2
+r64_loop unbank              ;back here to read and send each new word
+         gcall   op_read     ;read this word into REG1,REG0
+         sendbyte            ;send data word low byte
+         movff   reg1, reg0
+         sendbyte            ;send data word high byte
+         gcall   op_inc_tadr ;increment the desired target address by 1
+         decfsz  reg2        ;count one less word left to do
+         jump    r64_loop    ;back to do next data word
+
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command R30PGM
+;
+;   Get the two dsPIC program memory words at the current address and
+;   advance the address.  The starting address must be a multiple of 4.
+;
+  ifdef cm0r30pgm
+         command r30pgm
+
+         dbankif gbankadr
+         movlw   b'11111100' ;force current address to multiple of 4
+         andwf   tadr+0
+         gcall   f30_rdblock ;read 2 word block into the cache
+         gcall   f30_getcache ;get the cached words into REG2:REG0, REG5:REG3
+
+         sendbyte            ;send the first word
+         movff   reg1, reg0
+         sendbyte
+         movff   reg2, reg0
+         sendbyte
+
+         movff   reg3, reg0  ;send the second word
+         sendbyte
+         movff   reg4, reg0
+         sendbyte
+         movff   reg5, reg0
+         sendbyte
+
+         dbankif gbankadr
+         movlw   4           ;update desired address to after this block
+         addwf   tadr+0
+         movlw   0
+         addwfc  tadr+1
+         addwfc  tadr+2
+
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command WRITE <i16 data>
+;
+;   Write to the target at the current address and then increment
+;   the address by 1.  The low bits of the 16 bit data word are used
+;   when the amount of data at one address is less than 16 bits.
+;
+  ifdef cm0write
+         command write
+
+         getbyte             ;get low data byte into REG0
+         movff   reg0, reg2  ;temp save it in REG2
+         getbyte             ;get high data byte into REG0
+         movff   reg0, reg1  ;put high data byte into REG1
+         movff   reg2, reg0  ;put low data byte into REG0
+         gcall   led_writing ;indicate the target is being written to
+
+         waitdone            ;wait until done setting previous state
+         gcall   op_write    ;write REG1,REG0 to the current target address
+         gcall   op_inc_tadr ;increment the desired address for next operation
+
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command WRITE8 data0 ... data7
+;
+  ifdef cm0write8
+         command write8
+         gcall   led_writing ;indicate the target is being written to
+;
+;   Read the 8 data bytes.  Register usage:
+;
+;    REG0  -  Data byte from GETBYTE.
+;
+;    REG3:REG2  -  Address of next byte in buffer
+;
+;    REG8  -  Number of bytes left to go.
+;
+         movlw   8           ;init loop counter
+         movwf   reg8
+         movlw   low buf     ;init address of next buffer byte
+         movwf   reg2
+         movlw   high buf
+         movwf   reg3
+w8get    unbank              ;back here to get each new byte
+         getbyte             ;get this data byte into REG0
+         movff   reg2, fsr0l ;point to the destination byte
+         movff   reg3, fsr0h
+         movff   reg0, indf0 ;copy this byte into the save area
+         incf    reg2        ;advance the destination pointer
+         skip_ncarr
+         incf    reg3
+         decfsz  reg8        ;count one less byte left to do
+         jump    w8get       ;back to get the next byte
+;
+;   Write the bytes to the target.  The OP_WRITE subroutine writes
+;   the word in REG1:REG0.
+;
+         setf    reg1        ;set high byte for all word writes
+         movlw   8           ;init loop counter
+         movwf   reg8
+         movlw   low buf     ;init address of next buffer byte
+         movwf   reg2
+         movlw   high buf
+         movwf   reg3
+w8write  unbank              ;back here to get each new byte
+         movff   reg2, fsr0l ;point to the source byte
+         movff   reg3, fsr0h
+         movff   indf0, reg0 ;get this byte into word in REG1:REG0
+         incf    reg2        ;advance the source pointer
+         skip_ncarr
+         incf    reg3
+         waitdone            ;wait for any previous operation to complete
+         gcall   op_write    ;write REG1,REG0 to the current target address
+         gcall   op_inc_tadr ;increment the desired address for next operation
+         decfsz  reg8        ;count one less byte left to do
+         jump    w8write     ;back to get the next byte
+
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command PAN18 <dat 0> ... <dat 7>
+;
+;   Write one buffer of 8 bytes to a program memory panel.  This is a
+;   specialized command that must only be used if the target chip supports
+;   8 byte panel writes (like the 18Fxx2 and 18Fxx8), and the chip is
+;   properly set up.  The write will start at the current target address,
+;   which must be 8-byte aligned (low 3 bits zero).  The desired target
+;   address will be advanced by 8 by this command.  Successive 8 byte
+;   panel writes can therefore be performed with only a stream of PAN18
+;   commands.
+;
+  ifdef cm0pan18
+         command pan18
+         gcall   led_writing ;indicate the target is being written to
+
+         waitdone            ;wait until done setting previous state
+         gcall   f18_buf_setup ;set up for a new panel write
+;
+;   Get the 8 data bytes and write them to the panel buffer.  The last write
+;   will be performed with an opcode that also starts the programming process.
+;
+;   Register useage:
+;
+;     REG1,REG0  -  Data to send to target chip.
+;
+;     REG2  -  Temp save for data byte.
+;
+;     REG3  -  Loop counter.  Number of iterations left - 1.
+;
+;     REG8  -  Number of bits to send to the target.
+;
+         movlw   3           ;init loop counter, value = iterations - 1
+         movwf   reg3
+loop_pan18 unbank            ;back here each pair of bytes to write
+         getbyte             ;get the low byte
+         movf    reg0, w
+         movwf   reg2        ;save it in REG2
+         getbyte             ;get the high byte
+         movf    reg0, w
+         movwf   reg1        ;save it in REG1
+
+         movlw   b'1101'     ;get opcode for write 2 and inc address by 2
+         movf    reg3        ;set Z if this is last iteration
+         skip_nz             ;this is not the last iteration ?
+         movlw   b'1111'     ;last iteration, write 2 bytes and start programming
+         movwf   reg0        ;pass the bits to send
+         movlw   4           ;pass number of bits to send
+         movwf   reg8
+         gcall   sert_send   ;send the command opcode
+
+         movf    reg2, w     ;get the low data byte
+         movwf   reg0        ;pass it
+         movlw   16          ;pass number of bits to send
+         movwf   reg8
+         gcall   sert_send   ;send the two data bytes
+
+         decf    reg3        ;count one less iteration left to go
+         btfss   reg3, 7     ;done with all loop iterations ?
+         jump    loop_pan18  ;no, back to do next two bytes
+;
+;   The programming process has been started and must now be timed.  This is
+;   done by sending a NOP core instruction, with the 4th clock pulse held
+;   high to time the programming operation.
+;
+         clrf    reg0        ;set value of bits to send
+         movlw   3
+         movwf   reg8        ;pass number of bits to send
+         gcall   sert_send   ;send the first 3 bits of NOP command
+         gcall   sert_clkh   ;set the clock line high
+         startwait 1         ;start a wait for the programming to finish
+         ;
+         ;   Advance the desired address for the next operation to
+         ;   immediately after this block of 8 bytes.  These cycles are
+         ;   "free" because we have to wait for the programming to
+         ;   complete anyway.
+         ;
+         dbankif gbankadr
+         movlw   8           ;get amount to add to desired address
+         addwf   tadr+0      ;add the value to the low byte
+         skip_ncarr          ;no carry to middle byte ?
+         incf    tadr+1      ;propagate the carry
+         skip_nz             ;no carry into high byte ?
+         incf    tadr+2      ;propagate the carry
+         bcf     flag_tadrkn ;indicate assumed address in TADRI is incorrect
+
+         waitdone            ;wait for the programming to finish
+         gcall   sert_clkl   ;lower the clock line, end the programming operation
+
+         dbankif gbankadr
+         loadk16 nextwait, 1
+         gcall   wait_start
+         gcall   wait_wait   ;wait one more clock tick for high voltage discharge
+
+         clrf    reg0        ;set all the data bits to 0
+         clrf    reg1
+         movlw   16          ;pass number of bits to send
+         movwf   reg8
+         gcall   sert_send   ;send the remaining bits of the NOP command
+
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command W30PGM word24 word24 word24 word24
+;
+;   Load the 4 24-bit words into the write latches of program memory for
+;   the current address.  The starting address must be a multiple of 8.
+;   If these are the last 4 words in a block of WBUFSZ/2, then write the
+;   contents of the whole block from the write latches to the flash
+;   memory.
+;
+  ifdef cm0w30pgm
+         command w30pgm
+
+         gcall   led_writing ;indicate the target is being written to
+
+         dbankif gbankadr
+         movlw   b'11111000' ;force address to start of block of 8
+         andwf   tadr+0
+;
+;   Do word 0
+;
+         getbyte
+         movff   reg0, reg1
+         getbyte
+         movff   reg0, reg2
+         getbyte
+         waitdone
+         gcall   f30_pgmw0
+;
+;   Do word 1
+;
+         getbyte
+         movff   reg0, reg1
+         getbyte
+         movff   reg0, reg2
+         getbyte
+         gcall   f30_pgmw1
+;
+;   Do word 2
+;
+         getbyte
+         movff   reg0, reg1
+         getbyte
+         movff   reg0, reg2
+         getbyte
+         gcall   f30_pgmw2
+;
+;   Do word 3
+;
+         getbyte
+         movff   reg0, reg1
+         getbyte
+         movff   reg0, reg2
+         getbyte
+         gcall   f30_pgmw3
+
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command CHKCMD cmd
+;
+;   Returns 1 if the command CMD is implemented and 0 if it is not.
+;
+  ifdef cm0chkcmd
+         command chkcmd
+
+         getbyte             ;get the command opcode to test into REG0
+         clrf    reg4        ;init reply byte to indicate no such command
+;
+;   Make the 0-N table entry number of the selected opcode in W.
+;   Abort if opcode is before start of table.
+;
+    if first_opcode != 0     ;commands don't start at zero ?
+         movlw   first_opcode ;get lowest valid opcode value
+         subwf   reg0, w     ;make 0-N table entry number
+         skip_wle            ;opcode at or after start of table
+         jump    chksend     ;no, indicate opcode doesn't exist
+      else
+         movf    reg0, w     ;get opcode, which is also 0-N table entry number
+      endif
+;
+;   W contains the 0-N table entry number.
+;
+         movwf   reg1        ;save 0-N table index
+         sublw   tbl_cmd_n - 1 ;compare to last valid table index
+         skip_wle            ;index is within range of the table ?
+         jump    chksend     ;no, indicate opcode doesn't exist
+;
+;   REG1 contains the 0-N table index, which is a valid index for the table.
+;
+         mcalll  tblookup    ;look up table entry REG1 into REG3,REG2
+         movf    reg2, w
+         iorwf   reg3, w
+         skip_nz             ;this table entry is implemented ?
+         jump    chksend     ;no, indicate opcode doesn't exist
+
+         movlw   1
+         movwf   reg4        ;set response byte to indicate command exists
+
+chksend  unbank              ;common exit point, REG4 contains return byte
+         movff   reg4, reg0  ;pass the response byte
+         sendbyte            ;send it
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command GETPWR
+;
+;   Return the on-board processor power voltage in millivolts.
+;
+  ifdef cm0getpwr
+         command getpwr
+
+         gcall   ad_pwr      ;get the value into REG1:REG0
+         sendbyte            ;send the low byte
+         movff   reg1, reg0
+         sendbyte            ;send high byte
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command GETVDD
+;
+;   Return the target Vdd level in millivolts.
+;
+  ifdef cm0getvdd
+         command getvdd
+
+         gcall   ad_vdd      ;get the value into REG1:REG0
+         sendbyte            ;send low byte
+         movff   reg1, reg0
+         sendbyte            ;send high byte
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command GETVPP
+;
+;   Return the target Vpp level in millivolts.
+;
+  ifdef cm0getvpp
+         command getvpp
+
+         gcall   ad_vpp      ;get the value into REG1:REG0
+         sendbyte            ;send low byte
+         movff   reg1, reg0
+         sendbyte            ;send high byte
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command WAITCHK
+;
+;   Wait for the current wait interval to elapse and return its status
+;
+  ifdef cm0waitchk
+         command waitchk
+         extern  waiterr
+
+         waitdone            ;make sure any wait interval has finished
+         movff   waiterr, reg0
+         sendbyte            ;send the wait status byte
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command GETBUTT
+;
+;   Return the number of user button presses since power up.
+;
+  ifdef cm0getbutt
+         command getbutt
+         extern  butt
+
+         movff   butt, reg0
+         sendbyte
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command APPLED bri tphase1 tphase2
+;
+  ifdef cm0appled
+         command appled
+
+         getbyte
+         movff   reg0, reg2  ;save brightnesses in REG2
+         getbyte
+         movff   reg0, reg1  ;save phase 1 time in REG1
+         getbyte             ;get phase 2 time in REG0
+
+         dbankif gbankadr
+         movf    reg1, w     ;get 5mS ticks in phase 1
+         intr_off            ;update the App LED state as one atomic operation
+         movwf   cntlap      ;reset to start of phase 1
+         movwf   lapph1      ;set 5mS ticks in phase 1
+         bsf     flag_lapph1 ;indicate in phase 1
+         movff   reg2, lapbri ;set phase brightness values
+         movff   reg0, lapph2 ;set 5mS ticks in phase 2
+         intr_on             ;re-enable interrupts
+
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command RUN vdd
+;
+  ifdef cm0run
+         command run
+         getbyte             ;get Vdd value in REG0
+
+         waitdone
+         gcall   op_hold     ;hold the target chip in OFF state
+         waitdone
+         gcall   sert_datoff ;set PGD to high impedence
+         gcall   sert_clkoff ;set PGC to high impedence
+         gcall   vpp_off     ;release Vpp (MCLR) line
+         waitdone
+         movf    reg0, w
+         bnz     run_dvdd    ;drive Vdd to specific value ?
+;
+;   Let Vdd be driven by target circuit.
+;
+         gcall   vdd_off     ;set our Vdd drivers to high impedence
+         jump    run_donevdd ;done setting Vdd as desired
+;
+;   Drive Vdd to a specific (non-zero) voltage.  The 1-250 scaled voltage
+;   value is in W and REG0.
+;
+run_dvdd unbank
+         sublw   250         ;compare to maximum valid value
+         movlw   250
+         skip_wle            ;desired Vdd value is within range ?
+         movwf   reg0        ;no, clip at maximum allowed value
+
+    ifdef cm0vdd             ;programmer implements single variable Vdd ?
+         gcall   vdd_setv    ;set the desired Vdd voltage
+         waitdone
+         gcall   vdd_on      ;turn on Vdd
+      endif
+
+    ifdef cm0vddvals         ;programmer implements multiple Vdd settings ?
+         movf    reg0, w     ;set low/norm/high Vdd level to specified value
+         movwf   reg1
+         movwf   reg2
+         gcall   vdd_setvals
+         gcall   vdd_norm    ;set Vdd to the normal level
+      endif
+
+run_donevdd unbank           ;done setting Vdd
+         waitdone            ;wait for Vdd setting to stabalize
+         bsf     flag_ntohost ;disable host input timeout
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command HIGHZ
+;
+;   Set all target lines high impedence to the extent possible.
+;
+  ifdef cm0highz
+         command highz
+
+         waitdone
+         gcall   op_off      ;set the target circuit lines to high impedence
+         dbankif gbankadr
+         bsf     flag_ntohost ;disable host input timeout
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command NTOUT
+;
+;   Disable the host input stream timeout until the next command is
+;   received.
+;
+  ifdef cm0ntout
+         command ntout
+
+         dbankif gbankadr
+         bsf     flag_ntohost ;disable host input timeout
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command TEST2 dat
+;
+;   This command is for debugging and has no dedicated purpose.  It is
+;   rewritten as necessary.  It takes a byte parameter and returns
+;   4 bytes.
+;
+  ifdef cm0test2
+         command test2
+
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command DATADR adr24
+;
+;   Set the start address of where data EEPROM is mapped.  This value can
+;   have different meanings on different PIC types.
+;
+  ifdef cm0datadr
+         command datadr
+         extern  datadr
+
+         getbyte             ;get the 24 bit parameter into REG0:REG2:REG1
+         movff   reg0, reg1
+         getbyte
+         movff   reg0, reg2
+         getbyte
+
+         movff   reg1, datadr+0 ;write it to DATADR
+         movff   reg2, datadr+1
+         movff   reg0, datadr+2
+
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command WBUFSZ byte
+;
+;   Set the size of the target chip write buffer.
+;
+  ifdef cm0wbufsz
+         command wbufsz
+         extern  wbufsz
+
+         getbyte             ;get the value in REG0
+         movff   reg0, wbufsz
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command WBUFEN adr24
+;
+;   Set the last address covered by the write buffer.
+;
+  ifdef cm0wbufen
+         command wbufen
+         extern  wbufen
+
+         getbyte             ;get low byte and save it in REG2
+         movf    reg0, w
+         movwf   reg2
+         getbyte             ;get middle byte and save it in REG1
+         movf    reg0, w
+         movwf   reg1
+         getbyte             ;get high byte into REG0
+
+         dbankif gbankadr
+         movf    reg2, w     ;write the address to WBUFEN
+         movwf   wbufen+0
+         movf    reg1, w
+         movwf   wbufen+1
+         movf    reg0, w
+         movwf   wbufen+2
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command GETTICK
+;
+;   Return the timer clock tick period in units of 100nS in a 16 bit value.
+;
+  ifdef cm0gettick
+         command gettick
+
+         sendk   low tick100ns
+         sendk   high tick100ns
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command NAMESET n char1 ... charN
+;
+;   Set the user-assigned name of this unit.
+;
+  ifdef cm0nameset
+         command nameset
+
+         prom_acquire        ;acquire exclusive access to non-volatile memory
+         gcall   name_set_start ;init for writing the name
+         getbyte             ;get the number of characters into REG0
+         movff   reg0, reg1  ;init characters left to write in REG1
+
+naset_loop unbank            ;back here each new character
+         movf    reg1
+         skip_nz             ;at least one more char left to do ?
+         jump    naset_done  ;no
+         decf    reg1        ;count one less character left to do
+         getbyte             ;get this name character into REG0
+         gcall   name_set_char ;write it to the name string
+         jump    naset_loop  ;back to do next char
+naset_done unbank            ;done writing all the name characters
+
+         gcall   name_set_end ;finish writing the name to non-volatile memory
+         prom_release        ;release our exclusive lock on the non-volatile memory
+         goto    cmd_done    ;done processing this command
+    endif
+;
+;*******************************************************************************
+;
+;   Command NAMEGET
+;   Response: n char1 ... charN
+;
+;   Return the user-assigned name string for this unit.
+;
+  ifdef cm0nameget
+         command nameget
+
+         prom_acquire        ;acquire exclusive access to non-volatile memory
+         gcall   name_get_start ;init for reading name, length into REG0
+         sendbyte            ;send the string length byte
+         movff   reg0, reg1  ;init name characters left to return
+
+naget_loop unbank            ;back here each new character
+         movf    reg1
+         skip_nz             ;at least one more char left to do ?
+         jump    naget_done  ;no
+         decf    reg1        ;count one less character left to do
+         gcall   name_get_char ;get this character into REG0
+         sendbyte            ;send it
+         jump    naget_loop  ;back to do next name character
+naget_done unbank            ;done sending name to host
+
+         prom_release        ;release our exclusive lock on the non-volatile memory
+         goto    cmd_done    ;done processing this command
+    endif
+
+;*******************************************************************************
+;
+;   Command REBOOT
+;
+  ifdef cm0reboot
+         command reboot
+
+         reset               ;completely restart the processor
+
+    endif
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Macro REGADRCMD reg
+//
+//   Creates the code for a command that indicates the address of a specific
+//   target register.
+//
+//   REG is the raw register name (not a string).
+//
+/macro regadrcmd
+  /write
+  /write ";   Command " [ucase [qstr [arg 1]]] " adr16"
+  /write ";"
+  ifdef cm0[arg 1]
+         extern  adr_[arg 1]
+         command [arg 1]
+         getbyte
+         movff   reg0, adr_[arg 1]+0
+         getbyte
+         movff   reg0, adr_[arg 1]+1
+         goto    cmd_done
+    endif
+  /endmac
+
+;*******************************************************************************
+;
+;   Register address setting commands.  These all take a 16 bit argument, which
+;   is the address of the specific register in the target chip.
+;
+         regadrcmd eecon1
+         regadrcmd eeadr
+         regadrcmd eeadrh
+         regadrcmd eedata
+         regadrcmd visi
+         regadrcmd tblpag
+         regadrcmd nvmcon
+         regadrcmd nvmkey
+         regadrcmd nvmadr
+         regadrcmd nvmadru
+
+;*******************************************************************************
+;
+;   Command TPROGF ticks16
+;
+;   Sets the programming wait time in units of fast ticks.
+;
+  ifdef cm0tprogf
+         command tprogf
+         extern  tprogf      ;write wait time, units of instruction cycles
+
+         getbyte             ;get TICKS16 into REG0:REG1
+         movff   reg0, reg1
+         getbyte
+
+         movff   reg1, tprogf+0 ;save the result
+         movff   reg0, tprogf+1
+
+         goto    cmd_done
+    endif
+
+;*******************************************************************************
+;
+;   Command FTICKF
+;   Response: freq32
+;
+;   Reports the fast tick frequency.  Units are Hz divided by 256.
+;
+  ifdef cm0ftickf
+         command ftickf
+
+/block
+  /var new ii integer        ;scratch integer
+  /set ii [rnd [/ freq_inst 256]] ;make FREQ32 value
+
+         sendk   [and ii 16#FF]
+         sendk   [and [shiftr ii 8] 16#FF]
+         sendk   [and [shiftr ii 16] 16#FF]
+         sendk   [and [shiftr ii 24] 16#FF]
+
+         goto    cmd_done
+  /endblock
+
+    endif
+
+;*******************************************************************************
+;
+;   Command SENDSER n-1 dat ... dat
+;
+;   Send the DAT bytes over the serial port.
+;
+  ifdef cm0sendser
+         command sendser
+         waitdone
+
+         getbyte             ;get N-1 into REG0
+         incf    reg0, w     ;save N in REG1
+         movwf   reg1
+
+sendser_byte unbank          ;back here each new byte to get and send
+         getbyte             ;get this data byte into REG0
+         gcall   uart_put    ;send it out the UART
+         decfsz  reg1        ;count one less byte left to do
+         jump    sendser_byte ;back to do next byte
+
+         goto    cmd_done
+    endif
+
+;*******************************************************************************
+;
+;   Command RECVSER
+;   Response: n dat ... dat
+;
+;   Return bytes available from the serial port.
+;
+  ifdef cm0recvser
+         command recvser
+         waitdone
+
+         gcall   uart_inn    ;get number of available bytes in REG0
+         sendbyte            ;send N
+         movf    reg0, w     ;get number of bytes
+         skip_nz             ;there is at least one byte to transfer ?
+         goto    cmd_done    ;no, nothing more to do
+         movwf   reg1        ;init number of bytes left to do
+
+recvser_byte unbank          ;back here each new byte
+         gcall   uart_get    ;get this data byte into REG0
+         sendbyte            ;send it to the host
+         decfsz  reg1        ;count one less byte left to do
+         jump    recvser_byte ;back to do next byte
+
+         goto    cmd_done
+    endif

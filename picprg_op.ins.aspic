@@ -1,0 +1,719 @@
+;   ****************************************************************
+;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com).     *
+;   * All rights reserved except as explicitly noted here.         *
+;   *                                                              *
+;   * Permission to copy this file is granted as long as this      *
+;   * copyright notice is included in its entirety at the          *
+;   * beginning of the file, whether the file is copied in whole   *
+;   * or in part and regardless of whether other information is    *
+;   * added to the copy, and one of the following conditions is    *
+;   * met:                                                         *
+;   *                                                              *
+;   *   1 - Any executable derived from the this file is only run  *
+;   *       on a Embed Inc product.                                *
+;   *                                                              *
+;   *   2 - Any device that contains executable code derived from  *
+;   *       this file is not sold, not distributed for commercial  *
+;   *       advantage, and not more than 10 (ten) instances of the *
+;   *       device are created.                                    *
+;   *                                                              *
+;   * To copy this file otherwise requires explicit permission     *
+;   * from Embed Inc and may also require a fee.                   *
+;   *                                                              *
+;   * The information in this file is provided "as is".  Embed Inc *
+;   * makes no claims of suitability for any particular purpose    *
+;   * nor assumes any liability resulting from its use.            *
+;   ****************************************************************
+;
+;   Include file that implements the common parts of the OP module within
+;   various PIC programmer firmware types.  Each OP module must still be
+;   customized to the particular project include file.  The common code that is
+;   project-independent is therefore included into the project-specific module
+;   using this include file.
+;
+         extern  nvmcon_prog, nvmcon_conf ;NVMCON value for program and config writes
+         extern_flags        ;declare global flag bits EXTERN
+
+;*******************************************************************************
+;
+;   Derived settings.
+;
+/if [not [exist "reset_slow"]] then
+  /const reset_slow bool = false
+  /endif
+
+;*******************************************************************************
+;
+;   Global state.  All this state is assumed to be in the GBANK register
+;   bank by other modules.
+;
+         defram  gbankadr
+
+alg_reset res    1           ;RESET algorithm select from IDRESET command
+alg_write res    1           ;WRITE algorithm select from IDWRITE command
+alg_read res     1           ;READ algorithm select from IDREAD command
+tprog    res     1           ;write wait time, units of timer 2 ticks
+tprogf   res     2           ;write wait time, units of instruction cycles
+wbufsz   res     1           ;size of target chip write buffer
+wbufen   res     3           ;last address covered by write buffer
+
+tadr     res     3           ;requested target chip address of operation
+tadri    res     3           ;actual internal target chip address
+tadrr    res     3           ;target address to assume after reset
+datadr   res     3           ;data EEPROM mapped start address
+
+         global  alg_reset, alg_write, alg_read
+         global  tprog, tprogf
+         global  wbufsz, wbufen
+         global  tadr, tadri, tadrr
+         global  datadr
+
+;*******************
+;
+;   ADR_xxx variables.  These are global variables but are in the ADR bank, not
+;   the normal globals bank.
+;
+         defram  adrbankadr
+
+adr_eecon1 res   2           ;address of target EECON1 register
+adr_eeadr res    2           ;address of target EEADR register
+adr_eeadrh res   2           ;address of target EEADRH register
+adr_eedata res   2           ;address of target EEDATA register
+adr_visi res     2           ;address of target VISI register
+adr_tblpag res   2           ;address of target TBLPAG register
+adr_nvmcon res   2           ;address of target NVMCON register
+adr_nvmkey res   2           ;address of target NVMKEY register
+adr_nvmadr res   2           ;address of target NVMADR register
+adr_nvmadru res  2           ;address of target NVMADRU register
+
+         global  adr_eecon1, adr_eeadr, adr_eeadrh, adr_eedata
+         global  adr_visi, adr_tblpag
+         global  adr_nvmcon, adr_nvmkey, adr_nvmadr, adr_nvmadru
+
+
+.op      code
+;*******************************************************************************
+;
+;   Subroutine OP_RESET_DEF
+;
+;   Set the state used by various reset algorithms to their defaults.
+;
+;   This routine is called when this module is initialized and whenever the
+;   reset algorithm ID is set.
+;
+         glbsub  op_reset_def
+
+         dbankif gbankadr
+         loadk16 tprogf, 0
+
+         loadk16 nvmcon_prog, h'4001' ;NVMCON value for writing program memory
+         loadk16 nvmcon_conf, h'4008' ;NVMCON value for writing config words
+
+         clrflag 24h
+         clrflag 33ep
+
+
+         dbankif adrbankadr
+         loadk16 adr_eecon1, h'FA6' ;default assumed register addresses
+         loadk16 adr_eeadr, h'FA9'
+         loadk16 adr_eeadrh, h'FAA'
+         loadk16 adr_eedata, h'FA8'
+         loadk16 adr_visi, h'0784'
+         loadk16 adr_tblpag, h'0032'
+         loadk16 adr_nvmcon, h'0760'
+         loadk16 adr_nvmkey, h'0766'
+         loadk16 adr_nvmadr, h'0762'
+         loadk16 adr_nvmadru, h'0764'
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine OP_INIT
+;
+;   Initialize the hardware and software state managed by this module.
+;
+         glbsub  op_init, noregs
+
+         dbankif gbankadr
+         clrf    alg_reset   ;init all algorithms to unselected
+         clrf    alg_write
+         clrf    alg_read
+
+         movlw   10 * t2pms  ;init programming wait time to 10mS
+         movwf   tprog
+
+         loadk24 tadr, 0     ;init target chip address of next operation
+         loadk24 tadri, 0    ;init current internal target chip address
+         loadk24 tadrr, 0    ;init target address after reset
+         loadk24 datadr, 0   ;init where data mem is mapped to prog mem
+
+         mcall   op_reset_def ;init to defaults after reset ID set
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine OP_HOLD
+;
+;   Power down the target chip.  It will be actively held in the off state to
+;   the extent possible.  In any case it must be OK to disconnect from the
+;   target chip after any wait interval started by this routine finishes.
+;
+         glbsub  op_hold, noregs
+
+         dbankif gbankadr
+         btfsc   flag_offvddvpp ;turn off Vpp before Vdd ?
+         jump    offvdd      ;go turn off Vdd first
+         gcall   vpp_zero    ;hold the target in reset
+         wait
+
+offvdd   unbank              ;skip here to turn off Vdd first
+         gcall   sert_clkl   ;make sure clock line is low
+         wait
+         gcall   sert_datl   ;make sure data line is low
+         wait
+         gcall   vdd_zero    ;power down the target
+
+         dbankif gbankadr
+         btfss   flag_offvddvpp ;still need to turn off Vpp ?
+         jump    offdone     ;no, Vpp is already off
+         wait
+         gcall   vpp_zero    ;turn off Vpp
+offdone  unbank
+
+         waitms  50
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine OP_OFF
+;
+;   Set all the target circuit lines to high impedence to the extent
+;   possible.
+;
+         glbsub  op_off, noregs
+
+         gcall   sert_datoff ;release serial data line
+         gcall   sert_clkoff ;release serial clock line
+         gcall   vdd_off     ;release the power line
+         wait
+         gcall   vpp_off     ;release the Vpp (MCLR) line
+         wait
+         startwait waithiz   ;set wait time
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine OP_INC_TADR
+;
+;   Increment the desired target address by 1.
+;
+         glbsub  op_inc_tadr, noregs
+
+         dbankif gbankadr
+         incf    tadr+0      ;increment the low byte
+         movlw   0           ;propagate the carry
+         addwfc  tadr+1
+         addwfc  tadr+2
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine OP_INC_TADRI
+;
+;   Increment the local copy of the assumed target address by 1.
+;
+         glbsub  op_inc_tadri, noregs
+
+         dbankif gbankadr
+         incf    tadri+0     ;increment the low byte
+         movlw   0           ;propagate the carry
+         addwfc  tadri+1
+         addwfc  tadri+2
+
+         setflag adrinc      ;indicate target address incremented since reset
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Macro STARTOP idvar, idmax
+;
+;   This macro generates the common code at the start of generic operation
+;   routines that can be switched to different algorithms.  IDVAR is the
+;   variable in the GBANK bank that contains the algorithm ID.
+;
+;   A table of GOTO instruction must immediately follow this macro.  This
+;   table must have exactly IDMAX entries, with the first entry corresponding
+;   to ID 1, the second to ID 2, etc.  If IDVAR is 0 or is greater than
+;   IDMAX, then this macro jumps to the instruction immediately following
+;   the table.
+;
+;   All the general registers REG0 - REGn are preserved from the start
+;   of this macro to the target routine.
+;
+;   This version is for the PIC 18 family.  Table entries always contain
+;   a single GOTO instruction, which occupies 2 consecutive instruction
+;   words, which use 4 program memory addresses.
+;
+entsize  equ     4           ;size of each table entry in program memory addresses
+
+startop  macro   idvar, idmax
+         local   table
+
+         dbankif gbankadr
+         movf    idvar, w    ;get the algorithm ID
+         skip_nz             ;ID is not zero ?
+         jump    table + (idmax * entsize) ;ID is zero, abort
+         sublw   idmax
+         skip_wle            ;ID is within range of the table entries ?
+         jump    table + (idmax * entsize) ;no, abort
+;
+;   The ID value is within range.  Jump to the selected table entry.
+;
+         movlw   high table  ;init jump table entry address high bytes
+         movwf   pclath
+         movlw   upper table
+         movwf   pclatu
+
+         dbankif gbankadr
+         decf    idvar, w    ;get 0-N table index
+         rlncf   wreg        ;make amount to add to middle address byte
+         rlncf   wreg
+         andlw   3
+         addwf   pclath      ;update middle address byte
+         skip_ncarr
+         incf    pclatu      ;propagate carry to high address byte
+
+         decf    idvar, w    ;get 0-N table index
+         rlncf   wreg
+         rlncf   wreg
+         andlw   b'11111100' ;mask in low byte of offset x 4
+         addlw   low table   ;make complete low byte of table entry address
+         skip_ncarr
+         incf    pclath      ;propagate carry to middle byte
+         skip_ncarr
+         incf    pclatu      ;propagate carry to high byte
+         movwf   pcl         ;jump to the selected table entry
+
+table                        ;the jump table starts here
+         endm
+
+;*******************************************************************************
+;
+;   Macro TBLENT adr
+;
+;   Create one entry in an algorithm routine selection table.  Such a
+;   table is intended to start immediately after a STARTOP macro.
+;   This macro produces a table entry in the format expected by STARTOP.
+;   ADR is the address of the routine to jump to if this entry is
+;   selected.
+;
+;   This version is for the PIC 18 family where each table entry is
+;   a single GOTO instruction.
+;
+tblent   macro   adr
+         goto    adr
+         endm
+
+;*******************************************************************************
+;
+;   Subroutine OP_RESET
+;
+;   Reset the target chip and leave it ready for programming.
+;
+;   The wait interval must complete after this routine returns before any
+;   new target chip operations are attempted.  The current Vdd voltage
+;   is preserved unless its off, in which case it will be set to normal.
+;
+         glbsub  op_reset, regf0 | regf1 | regf2 | regf3 | regf8
+
+         dbankif gbankadr
+         movff   tadrr+0, tadri+0 ;set address assumed for target after reset
+         movff   tadrr+1, tadri+1
+         movff   tadrr+2, tadri+2
+         bcf     flag_tadrkn ;init to target address is unknown
+         bcf     flag_adrinc ;target address not incremented since reset
+
+;        bcf     flag_24h    ;init to this is not a 24H or 33F part
+;        loadk16 nvmcon_prog, h'4001' ;init dsPIC defaults
+;        loadk16 nvmcon_conf, h'4008'
+
+         wait                ;make sure any existing wait interval has elapsed
+         mcall   op_hold     ;hold the target in reset
+         wait
+;
+;   Table of routines that implement each of the specific algorithms.
+;
+         startop alg_reset, 12
+
+         tblent  reset_vpp_vdd ;1 - Vpp on before Vdd, adr reset to TADRR
+         tblent  reset_vdd_vpp ;2 - Vdd on before Vpp, adr reset to TADRR
+         tblent  reset_vdvp_unk ;3 - Vdd on before Vpp, adr unknown
+         tblent  reset_vdd_vpp ;4 - for dsPIC
+         tblent  reset_vdd_vpp ;5 - Vdd quickly followed by Vpp
+         tblent  reset_18j   ;6 - special unlock sequence for 18FJ devices
+         tblent  reset_24h   ;7 - sets FLAG_24H and specific NVMCON values
+         tblent  reset_24f   ;8 - sets FLAG_24H and specific NVMCON values
+         tblent  reset_16f182x ;9 - special unlock sequence for 16F182x, no Vpp
+         tblent  reset_24fj  ;10 - sets FLAG_24H and specific NVMCON values
+         tblent  reset_18k80 ;11 - Vdd, then Vpp, then 32 bit signature
+         tblent  reset_33ep  ;12 - 24EP, 33EP, signature, extra wait times and NOPs
+
+res_done unbank              ;back here after local reset algorithm performed
+;
+;   Done with the canned reset algorithm.  Jump to specific driver
+;   routines to perform additional operations, if any.
+;
+         extern  f30_reset
+         startop alg_reset, 12
+
+         tblent  done_reset  ;1
+         tblent  done_reset  ;2
+         tblent  done_reset  ;3
+         tblent  f30_reset   ;4 - dsPIC 30F
+         tblent  done_reset  ;5
+         tblent  done_reset  ;6
+         tblent  f30_reset   ;7 - PIC 24H and 33F
+         tblent  f30_reset   ;8 - PIC 24F
+         tblent  done_reset  ;9
+         tblent  f30_reset   ;10 - PIC 24FJ
+         tblent  done_reset  ;11
+         tblent  f30_reset   ;12 - 24EP, 33EP
+
+         glbent  done_reset  ;selected algorithm routines jump here when done
+         leaverest
+
+;**********
+;
+;   RESET_VPP_VDD
+;
+;   Perform a complete reset and enter programming mode.  The Vpp voltage
+;   is raised before the Vdd voltage.  This is required, for example,
+;   by the 16F62x.
+;
+reset_vpp_vdd unbank
+         dbankif gbankadr
+         bsf     flag_tadrkn ;target address will be known
+         gcall   vpp_on      ;turn on the programming voltage
+         wait
+         gcall   vdd_on      ;turn on the target chip power
+         jump    res_done    ;done with customizable part of reset algorithm
+
+;**********
+;
+;   RESET_VDD_VPP
+;
+;   Perform a complete reset and enter programming mode.  The Vdd voltage
+;   is raised before the Vpp voltage.  This is required, for example,
+;   by the 18Fxxx.
+;
+reset_vdd_vpp unbank
+         dbankif gbankadr
+         bsf     flag_tadrkn ;target address will be known
+
+;**********
+;
+;   Same as RESET_VDD_VPP except that the target address will be unknown.
+;
+reset_vdvp_unk unbank        ;target address becomes unknown
+         gcall   vdd_on      ;turn on the target chip power
+         wait
+         gcall   vpp_on      ;turn on the programming voltage
+         jump    res_done    ;done with customizable part of reset algorithm
+
+;**********
+;
+;   RESET_16F182X
+;
+;   This performs the special unlock sequence required of some of the 4 digit
+;   16F parts.  The sequence is:
+;
+;     1 - Raise Vdd while holding Vpp low.
+;
+;     2 - Wait a minimum of 250us.
+;
+;     3 - Clock the 32 bit value 4D434850h into the device using PGC and PGD
+;         normally.
+;
+;     4 - Perform one additional clock.
+;
+;   The part is currently powered down with PGC, PGD, and Vpp actively held
+;   low.  Any wait interval after getting into this state has already elapsed.
+;
+reset_16f182x unbank
+         dbankif gbankadr
+         bcf     flag_tadrkn ;invalidate target adr to force adr reset
+         gcall   vdd_on      ;turn on Vdd
+         wait
+         waitms  1           ;wait 1 extra millisecond deliberately
+
+/if reset_slow then
+         waitms  400         ;wait for power supervisor to stabalize
+         gcall   vpp_on      ;do a MCRL reset now that power is stable
+         wait
+         waitms  1
+         gcall   vpp_zero
+         wait
+  /endif
+
+         loadk32 reg0, h'4D434850' ;send special unlock sequence
+         loadk8  reg8, 32
+         gcall   sert_send
+         loadk8  reg0, 0     ;do one additional clock by sending a 0 bit
+         loadk8  reg8, 1
+         gcall   sert_send
+
+         jump    res_done    ;done with selected reset algorithm
+
+;**********
+;
+;   RESET_18J
+;
+;   This performs the special unlock sequence required of some 18FxxJyy devices.
+;   The sequence is:
+;
+;     1 - Raise Vdd.
+;
+;     2 - Blip Vpp for a short time.
+;
+;     3 - Clock the 32 bit value 4D434850h into the device using PGC and PGD
+;         normally.
+;
+;     4 - Raise Vpp.
+;
+reset_18j unbank
+         dbankif gbankadr
+         bsf     flag_tadrkn ;target address will be known
+         gcall   vpp_zero    ;make sure Vpp is low
+         wait
+         gcall   vdd_zero    ;make sure Vdd is low
+         wait
+         gcall   vdd_on      ;turn on Vdd
+         wait
+         gcall   vpp_blip    ;produce short positive glitch on Vpp
+
+         loadk32 reg0, h'0A12C2B2' ;send special unlock sequence
+         loadk8  reg8, 32
+         gcall   sert_send
+
+         gcall   vpp_on      ;turn on Vpp
+
+         jump    res_done    ;done with selected reset algorithm
+
+;**********
+;
+;   RESET_18K80
+;
+;   This performs the high voltage program mode entry for 18FxxK80 devices.
+;   The sequence is:
+;
+;     1 - Raise Vdd.
+;
+;     2 - Raise Vpp to high voltage.
+;
+;     3 - Clock the 32 bit value 4D434850h into the device using PGC and PGD
+;         normally.
+;
+reset_18k80 unbank
+         dbankif gbankadr
+         bsf     flag_tadrkn ;target address will be known
+         gcall   vpp_zero    ;make sure Vpp is low
+         wait
+         gcall   vdd_zero    ;make sure Vdd is low
+         wait
+         gcall   vdd_on      ;turn on Vdd
+         wait
+         gcall   vpp_on      ;turn on Vpp
+         wait
+
+         loadk32 reg0, h'0A12C2B2' ;send special unlock sequence
+         loadk8  reg8, 32
+         gcall   sert_send
+
+         jump    res_done    ;done with selected reset algorithm
+
+;**********
+;
+;   RESET_24H
+;
+reset_24h unbank
+         dbankif gbankadr
+         loadk16 nvmcon_conf, h'4000'
+         jump    reset_24    ;to common part of PIC 24 and 33 reset
+
+;**********
+;
+;   RESET_24F
+;
+reset_24f unbank
+         dbankif gbankadr
+         loadk16 nvmcon_prog, h'4004'
+         loadk16 nvmcon_conf, h'4004'
+         jump    reset_24    ;to common part of PIC 24 and 33 reset
+
+;**********
+;
+;   RESET_24FJ
+;
+;   NVMCON prog is 4001h, which is the default.  NVMCON config is not used, so
+;   is left as the default.  FLAG_24H is set.
+;
+reset_24fj unbank
+         dbankif gbankadr
+         jump    reset_24    ;to common part of PIC 24 and 33 reset
+
+;**********
+;
+;   RESET_33EP
+;
+reset_33ep unbank
+         dbankif gbankadr
+         loadk16 nvmcon_conf, h'4001' ;NVMCON value for writing config words
+         setflag 33ep        ;indicate this is a 24EP/33EP part
+         jump    reset_24    ;to common part of PIC 24/33 reset
+
+;**********
+;
+;   Common code for performing some types of 16 bit PIC and dsPICs reset.
+;
+;   This performs the special unlock sequence required for 24H and 33F devices.
+;   The sequence is:
+;
+;     1 - Raise Vdd.
+;
+;     2 - Blip Vpp for a short time.
+;
+;     3 - Clock the 32 bit value 4D434851h into the device using PGC and PGD
+;         normally.  The signature is clocked in starting with the MSB.  Since
+;         our routines send data starting with the LSB, we flip this signature
+;         MSB to LSB and actually send 8A12C2B2h LSB-first.
+;
+;     4 - Raise Vpp.
+;
+reset_24 unbank              ;common part of PIC 24 and 33 reset
+         setflag 24h         ;indicate target is a 24 or 33 part
+         setflag tadrkn      ;target address will be known
+
+         gcall   vpp_zero    ;make sure Vpp is low
+         wait
+         gcall   vdd_zero    ;make sure Vdd is low
+         wait
+         gcall   vdd_on      ;turn on Vdd
+         wait
+         waitms  1
+         gcall   vpp_blip    ;produce short positive glitch on Vpp
+         wait
+         waitms  2
+
+         loadk32 reg0, h'8A12C2B2' ;send special unlock sequence
+         loadk8  reg8, 32
+         gcall   sert_send
+
+         gcall   vpp_on      ;turn on Vpp
+         wait                ;wait for any Vpp change time to elapse
+         startwait 51        ;min required wait time before using PGC/PGD
+
+         jump    res_done    ;done with selected reset algorithm
+
+;*******************************************************************************
+;
+;   Subroutine OP_ADR
+;
+;   Set the address in the target chip to TADR.  TADR is not altered.  Unless
+;   some other state is changed, this will be the address of the next read or
+;   write operation.
+;
+         glbsub  op_adr, regf0 | regf1 | regf2 | regf3 | regf8
+;
+;   Table of routines that implement each of the specific algorithms.
+;
+         extern  core12_adr
+         startop alg_read, 6
+
+         tblent  done_adr    ;1 - for 16Fxxx
+         tblent  done_adr    ;2 - generic 18F, program space only
+         tblent  core12_adr  ;3 - for 12 bit core devices
+         tblent  done_adr    ;4 - for dsPIC
+         tblent  done_adr    ;5 - generic 18F, program and EEPROM space
+         tblent  done_adr    ;6 - for enhanced (4 digit) 16F
+;
+;   Illegal algorithm ID or no algorithm set.
+;
+         glbent  done_adr    ;selected algorithm routines jump here when done
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine OP_READ
+;
+;   Read the target chip data at address TADR.  The data is returned in the
+;   low bits of REG1:REG0 with unused high bits set to 0.
+;
+         glbsub  op_read, regf2 | regf3 | regf8
+;
+;   Table of routines that implement each of the specific algorithms.
+;
+         extern  f16_read, f16e_read, f18_read, core12_read, f30_read
+         startop alg_read, 6
+
+         tblent  f16_read    ;1 - for 16Fxxx
+         tblent  f18_read    ;2 - generic 18F, program space only
+         tblent  core12_read ;3 - for 12 bit core devices
+         tblent  f30_read    ;4 - for dsPIC
+         tblent  f18_read    ;5 - generic 18F, program and EEPROM space
+         tblent  f16e_read   ;6 - for enhanced (4 digit) 16F
+;
+;   Illegal algorithm ID or no algorithm set.
+;
+         glbent  done_read   ;selected algorithm routines jump here when done
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine OP_WRITE
+;
+;   Write the data in REG1:REG0 to the target chip at address TADR.
+;
+;   The wait interval must complete after this routine returns before any
+;   new target chip operations are attempted.
+;
+         glbsub  op_write, regf0 | regf1 | regf2 | regf3 | regf8
+
+         dbankif gbankadr
+         bcf     flag_op1    ;init operation customization flags
+         bcf     flag_op2
+         bcf     flag_op3
+         bcf     flag_op4
+         dbankif gbankadr
+         movf    tprog, w    ;init next wait time to programming time value
+         movwf   nextwait+0
+         clrf    nextwait+1
+         clrf    nextwait+2
+;
+;   Table of routines that implement each of the specific algorithms.
+;
+         extern  f16_write, write_12f6, core12_write, f30_write
+         extern  write_16f87xa, write_16f716, write_16f688, write_18f2520
+         extern  write_16f88, write_16f77, write_16f88x, write_16f182x
+         startop alg_write, 12
+
+         tblent  f16_write   ;1 - for 16Fxxx
+         tblent  write_12f6  ;2 - for 12F6xx
+         tblent  core12_write ;3 - for 12 bit core devices
+         tblent  f30_write   ;4 - for dsPIC
+         tblent  write_16f87xa ;5 - for 16F87xA
+         tblent  write_16f716 ;6 - 16F716
+         tblent  write_16f688 ;7 - 16f688 and related
+         tblent  write_18f2520 ;8 - 18F2520 and related
+         tblent  write_16f88 ;9 - BEGIN PROG 24, END PROG 23
+         tblent  write_16f77 ;10 - BEGIN PROG 8, END PROG 14
+         tblent  write_16f88x ;11 - BEGIN PROG 24, END PROG 10
+         tblent  write_16f182x ;12 - BEGIN 24 and END 10, config BEGIN 8
+;
+;   Illegal algorithm ID or no algorithm set.
+;
+         glbent  done_write  ;selected algorithm routines jump here when done
+         leaverest
