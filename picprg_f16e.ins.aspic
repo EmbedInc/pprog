@@ -208,12 +208,14 @@ sa_doneinc unbank            ;done incrementing current address to match desired
 ;
 ;   Internal routine WRITE_COMM
 ;
+;   Write the word in REG1:REG0 to the address in TADR.
+;
 ;   This is the common write routine jumped to by the other write routines after
 ;   any customizing switches have been set.  The possible customizations are:
 ;
 ;     FLAG_OP1
 ;       0: no command to end programming, timed only
-;       1: issued command to end programming after wait time
+;       1: issue command to end programming after wait time
 ;
 ;     CMD_PROG  -  Start programming opcode.
 ;
@@ -227,6 +229,7 @@ write_comm unbank
 ;
          movf    reg0, w     ;save original REG0 value in REG2
          movwf   reg2
+
          dbankif gbankadr
          movlw   2           ;get LOAD DATA FOR PROGRAM MEMORY command
          btfsc   flag_spdata ;really are in program memory space ?
@@ -315,19 +318,21 @@ did_write unbank             ;done performing write cycle, if any, for this word
          dbankif lbankadr
          loadk8  cmd_prog, 24 ;BEGIN EXTERNALLY TIMED PROGRAMMING
          loadk8  cmd_end, 10 ;END EXTERNALLY TIMED PROGRAMMING
+         setflag op1         ;indicate end programming command required
+
          dbankif gbankadr
-         bsf     flag_op1    ;indicate end programming command required
          btfsc   tadr+1, 7   ;in regular program memory region ?
          jump    cfg182x     ;no, in config region
          btfss   flag_spdata ;in data address space ?
-         jump    write_comm  ;in program memory address space
+         jump    write_comm  ;do regular program memory write
          ;
          ;   Not writing to regular program memory.
          ;
-cfg182x
+cfg182x  unbank
          setwait iprogms     ;set wait time for internally timed programming
          dbankif lbankadr
          loadk8  cmd_prog, 8 ;BEGIN INTERNALLY TIMED PROGRAMMING
+         clrflag op1         ;indicate to not issue programming end command
          jump    write_comm
 
          end

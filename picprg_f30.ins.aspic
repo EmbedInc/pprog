@@ -343,7 +343,7 @@ inst     macro   opc
 ;
 ;   Load target chip Wn register from REG1:REG0.
 ;
-/loop for wn from 0 to 14    ;once for each Wreg to generate routine for
+/loop with wn from 0 to 14   ;once for each Wreg to generate routine for
   /write
          locsub  load_w[v wn]
          movlw   [shiftl wn 4] | 2 ;reg number in high nibble, 2 in low nibble
@@ -406,7 +406,7 @@ loadwn
 ;
 ;   FSR0 is preserved.
 ;
-/loop for wn from 0 to 15    ;once for each Wreg to generate routine for
+/loop with wn from 0 to 15   ;once for each Wreg to generate routine for
   /write
          locsub  store_w[v wn]
          movlw   [v wn]      ;get the source register number into W
@@ -465,7 +465,7 @@ store_w  unbank
 ;
 ;   FSR0 is preserved.
 ;
-/loop for wn from 0 to 15    ;once for each Wreg to generate routine for
+/loop with wn from 0 to 15   ;once for each Wreg to generate routine for
   /write
          locsub  ram_w[v wn]
          movlw   [v wn]      ;get the source register number into W
