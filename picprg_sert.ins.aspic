@@ -1,28 +1,64 @@
-;   ***************************************************************
-;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com)     *
-;   *                                                             *
-;   * Permission to copy this file is granted as long as this     *
-;   * copyright notice is included in its entirety at the         *
-;   * beginning of the file, whether the file is copied in whole  *
-;   * or in part and regardless of whether other information is   *
-;   * added to the copy.                                          *
-;   *                                                             *
-;   * The contents of this file may be used in any way,           *
-;   * commercial or otherwise.  This file is provided "as is",    *
-;   * and Embed Inc makes no claims of suitability for a          *
-;   * particular purpose nor assumes any liability resulting from *
-;   * its use.                                                    *
-;   ***************************************************************
+;   ****************************************************************
+;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com).     *
+;   * All rights reserved except as explicitly noted here.         *
+;   *                                                              *
+;   * Permission to copy this file is granted as long as this      *
+;   * copyright notice is included in its entirety at the          *
+;   * beginning of the file, whether the file is copied in whole   *
+;   * or in part and regardless of whether other information is    *
+;   * added to the copy, and one of the following conditions is    *
+;   * met:                                                         *
+;   *                                                              *
+;   *   1 - Any executable derived from the this file is only run  *
+;   *       on a Embed Inc product.                                *
+;   *                                                              *
+;   *   2 - Any device that contains executable code derived from  *
+;   *       this file is not sold, not distributed for commercial  *
+;   *       advantage, and not more than 10 (ten) instances of the *
+;   *       device are created.                                    *
+;   *                                                              *
+;   * To copy this file otherwise requires explicit permission     *
+;   * from Embed Inc and may also require a fee.                   *
+;   *                                                              *
+;   * The information in this file is provided "as is".  Embed Inc *
+;   * makes no claims of suitability for any particular purpose    *
+;   * nor assumes any liability resulting from its use.            *
+;   ****************************************************************
 ;
-;   Include file that implements the common parts of the SERT
-;   module within various PIC programmer firmware types.  Each
-;   SERT module must still be customized to the particular project
-;   include file.  The common code that is project-independent
-;   is therefore included into the project-specific module using
-;   this include file.
+;   Include file that implements the common parts of the SERT module within
+;   various PIC programmer firmware types.  Each SERT module must still be
+;   customized to the particular project include file.  The common code that is
+;   project-independent is therefore included into the project-specific module
+;   using this include file.
+;
+;   The project-specific part of this module must define the following macros
+;   and subroutines:
+;
+;     PGC_LOW cy
+;     PGC_HIGH cy
+;     PGC_OFF cy
+;     PGD_LOW cy
+;     PGD_HIGH cy
+;     PGD_OFF cy
+;
+;       These macros set the PGC or PGD line to be driven low, driven high, or
+;       to high impedance.  CY is the minimum number of instruction cycles since
+;       the last change to either output line.
+;
+;     SKIP_PGDHI cy
+;     SKIP_PGDLO cy
+;
+;       Macros to skip the next instruction after the macro if the PGD line is
+;       high or low.  CY is the minimum number of instruction cycles since the
+;       last change to either output line.
+;
+;     SERT_TEST_TDRIVE
+;
+;       Subroutine to test whether the PGD line is being driven by the target.
+;       Flag TDRIVE is set if the target is driving the line, and cleared if
+;       not.
 ;
 
-;
 ;*******************************************************************************
 ;
 ;   Subroutine SERT_CLKL
@@ -34,7 +70,7 @@
          pgc_low 3
 
          leaverest
-;
+
 ;*******************************************************************************
 ;
 ;   Subroutine SERT_CLKH
@@ -46,7 +82,7 @@
          pgc_high 3
 
          leaverest
-;
+
 ;*******************************************************************************
 ;
 ;   Subroutine SERT_CLKOFF
@@ -58,7 +94,7 @@
          pgc_off 3
 
          leaverest
-;
+
 ;*******************************************************************************
 ;
 ;   Subroutine SERT_DATL
@@ -70,7 +106,7 @@
          pgd_low 3
 
          leaverest
-;
+
 ;*******************************************************************************
 ;
 ;   Subroutine SERT_DATH
@@ -82,7 +118,7 @@
          pgd_high 3
 
          leaverest
-;
+
 ;*******************************************************************************
 ;
 ;   Subroutine SERT_DATOFF
@@ -94,13 +130,13 @@
          pgd_off 3
 
          leaverest
-;
+
 ;*******************************************************************************
 ;
 ;   Subroutine SERT_DATR
 ;
-;   Read the data line and return its value in the low bit of REG0.
-;   The remaining REG0 bits are cleared.
+;   Read the data line and return its value in the low bit of REG0.  The
+;   remaining REG0 bits are cleared.
 ;
          glbsub  sert_datr, noregs
 
@@ -109,13 +145,13 @@
          bsf     reg0, 0     ;no, return indicating high
 
          leaverest
-;
+
 ;*******************************************************************************
 ;
 ;   Subroutine SERT_TEST
 ;
-;   Allow for testing the PGC and PGD lines by clocking them at high speed
-;   in quadrature.
+;   Allow for testing the PGC and PGD lines by clocking them at high speed in
+;   quadrature.
 ;
          glbsub  sert_test, noregs
 
@@ -125,18 +161,17 @@ test_loop
          pgc_low 1
          pgd_low 1
          jump    test_loop
-;
+
 ;*******************************************************************************
 ;
 ;   Subroutine SERT_SEND
 ;
 ;   Send raw data bits to the target chip.  The bits are sent from REGA,
-;   starting with the LSB.  REG8 indicates the number of bits to send,
-;   which must be from 1 to 32.
+;   starting with the LSB.  REG8 indicates the number of bits to send, which
+;   must be from 1 to 32.
 ;
-;   The clock line is assumed to be driven low on entry and will be left
-;   driven low on exit.  The data line is assumed to be off and will be left
-;   off.
+;   The clock line is assumed to be driven low on entry and will be left driven
+;   low on exit.  The data line is assumed to be off and will be left off.
 ;
          glbsub  sert_send, regfa | regf8
 
@@ -181,7 +216,7 @@ sendbit0 unbank
 send_leave unbank            ;jump here on done sending all bits
          pgd_off 3           ;leave data line undriven
          leaverest
-;
+
 ;*******************************************************************************
 ;
 ;   Subroutine SERT_SEND6
@@ -195,14 +230,14 @@ send_leave unbank            ;jump here on done sending all bits
          mcall   sert_send   ;send the bits
 
          leaverest
-;
+
 ;*******************************************************************************
 ;
 ;   Subroutine SERT_SEND14SS
 ;
-;   Send the 14 data bits in the low bits of REG1,REG0 to the target.
-;   The data bits will be surrounded by a 0 start and stop bit, for a
-;   total of 16 bits sent.
+;   Send the 14 data bits in the low bits of REG1,REG0 to the target.  The data
+;   bits will be surrounded by a 0 start and stop bit, for a total of 16 bits
+;   sent.
 ;
          glbsub  sert_send14ss, regf0 | regf1 | regf8
 
@@ -217,7 +252,7 @@ send_leave unbank            ;jump here on done sending all bits
          mcall   sert_send   ;send the bits
 
          leaverest
-;
+
 ;*******************************************************************************
 ;
 ;   Subroutine SERT_RECV
@@ -267,14 +302,14 @@ recv_norm
 
 recv_dnorm                   ;done normalizing the value in LSB of REGA
          leaverest
-;
+
 ;*******************************************************************************
 ;
 ;   Subroutine SERT_RECV14SS
 ;
-;   Receive 14 data bits from the target, surrounded by a start and stop
-;   bit.  The 14 data bits are returned in the low bits of REG1,REG0 with
-;   the unused high bits set to 0.
+;   Receive 14 data bits from the target, surrounded by a start and stop bit.
+;   The 14 data bits are returned in the low bits of REG1,REG0 with the unused
+;   high bits set to 0.
 ;
          glbsub  sert_recv14ss, regf2 | regf3 | regf8
 
@@ -288,3 +323,232 @@ recv_dnorm                   ;done normalizing the value in LSB of REGA
          andwf   reg1        ;make sure the unused bits in REG1 are 0
 
          leaverest
+
+;*******************************************************************************
+;
+;   Subroutine SERT_SEND8M
+;
+;   Send the 8 data bits in REG0 to the target chip in most to least significant
+;   order.
+;
+;   The clock line is assumed to be driven low on entry and will be left driven
+;   low on exit.  The data line is assumed to be off and will be left off.
+;
+         glbsub  sert_send8m, regf0 | regf1
+
+         loadk8  reg1, 8     ;init number of bits left to send
+         btfsc   reg0, 7     ;first bit is a 0 ?
+         jump    s8m_1       ;first bit is a 1
+;
+;   Send a 0 bit.
+;
+s8m_0    unbank
+         pgd_low 5           ;set the data line to this bit value
+         pgc_high 999        ;drive the clock high
+         rlcf    reg0        ;move the next data bit into place
+         pgc_low 2           ;drive the clock line low again
+
+         dcfsnz  reg1        ;count one less bit left to do
+         jump    s8m_leave   ;all done
+         btfss   reg0, 7     ;next bit is a 1 ?
+         jump    s8m_0       ;no, next bit is a 0
+;
+;   Send a 1 bit.
+;
+s8m_1    unbank
+         pgd_high 5          ;set the data line to this bit value
+         pgc_high 999        ;drive the clock high
+         rlcf    reg0        ;move the next data bit into place
+         pgc_low 2           ;drive the clock line low again
+
+         dcfsnz  reg1        ;count one less bit left to do
+         jump    s8m_leave   ;all done
+         btfss   reg0, 7     ;next bit is a 1 ?
+         jump    s8m_0       ;no, next bit is a 0
+         jump    s8m_1       ;yes, next bit is a 1
+;
+;   Done sending the bits.
+;
+s8m_leave unbank
+         pgd_off 3           ;leave data line undriven
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine SERT_SEND24M
+;
+;   Send the 24 data bits in REG2:REG1:REG0 to the target chip in most to least
+;   significant order.
+;
+;   The clock line is assumed to be driven low on entry and will be left driven
+;   low on exit.  The data line is assumed to be off and will be left off.
+;
+         glbsub  sert_send24m, regf0 | regf1 | regf2 | regf3
+
+         loadk8  reg3, 24    ;init number of bits left to send
+         btfsc   reg2, 7     ;first bit is a 0 ?
+         jump    s24m_1      ;first bit is a 1
+;
+;   Send a 0 bit.
+;
+s24m_0   unbank
+         pgd_low 5           ;set the data line to this bit value
+         pgc_high 999        ;drive the clock high
+         rlcf    reg0        ;move the next data bit into place
+         rlcf    reg1
+         rlcf    reg2
+         pgc_low 4           ;drive the clock line low again
+
+         dcfsnz  reg3        ;count one less bit left to do
+         jump    s24m_leave  ;all done
+         btfss   reg2, 7     ;next bit is a 1 ?
+         jump    s24m_0      ;no, next bit is a 0
+;
+;   Send a 1 bit.
+;
+s24m_1   unbank
+         pgd_high 5          ;set the data line to this bit value
+         pgc_high 999        ;drive the clock high
+         rlcf    reg0        ;move the next data bit into place
+         rlcf    reg1
+         rlcf    reg2
+         pgc_low 4           ;drive the clock line low again
+
+         dcfsnz  reg3        ;count one less bit left to do
+         jump    s24m_leave  ;all done
+         btfss   reg2, 7     ;next bit is a 1 ?
+         jump    s24m_0      ;no, next bit is a 0
+         jump    s24m_1      ;yes, next bit is a 1
+;
+;   Done sending the bits.
+;
+s24m_leave unbank
+         pgd_off 3           ;leave data line undriven
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine SERT_SEND16MSS24
+;
+;   Send the 16 bits in REG1:REG0 to the target chip in a 24 bit word with the
+;   appropriate start, stop, and padding bits.  The data is sent in most to
+;   least significant order.
+;
+         glbsub  sert_send16mss24, regf0 | regf1 | regf2
+
+         clrf    reg2        ;init high byte to 0
+         bcf     status, c   ;set value of bit to shift in
+         rlcf    reg0        ;position the payload within the 24 bit word
+         rlcf    reg1
+         rlcf    reg2
+         mcall   sert_send24m ;send the 24 bit word
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine SERT_SEND14MSS24
+;
+;   Send the 14 bits in REG1:REG0 to the target chip in a 24 bit word with the
+;   appropriate start, stop, and padding bits.  The data is sent in most to
+;   least significant order.
+;
+         glbsub  sert_send14mss24, regf0 | regf1 | regf2
+
+         clrf    reg2        ;init high byte to 0
+         movlw   h'3F'       ;mask in only the valid data bits
+         andwf   reg1
+
+         bcf     status, c   ;set value of bit to shift in
+         rlcf    reg0        ;position the payload within the 24 bit word
+         rlcf    reg1
+         mcall   sert_send24m ;send the 24 bit word
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine SERT_SEND8MSS24
+;
+;   Send the 8 bits in REG0 to the target chip in a 24 bit word with the
+;   appropriate start, stop, and padding bits.  The data is sent in most to
+;   least significant order.
+;
+         glbsub  sert_send8mss24, regf0 | regf1 | regf2
+
+         clrf    reg1        ;init high bytes to 0
+         clrf    reg2
+         bcf     status, c   ;set value of bit to shift in
+         rlcf    reg0        ;position the payload within the 24 bit word
+         rlcf    reg1
+         rlcf    reg2
+         mcall   sert_send24m ;send the 24 bit word
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine SERT_RECV24M
+;
+;   Receive 24 raw bits from the target, and return them in REG2:REG1:REG0.  The
+;   bits are received in most to least significant order.
+;
+         glbsub  sert_recv24m, regf3
+
+         pgc_low 100         ;make sure the clock line is low
+         pgd_off 100         ;make sure our data line drivers are off
+         loadk8  reg3, 24    ;init number of bits left to receive
+
+r24m_bit unbank              ;back here to receive each new bit
+         pgc_high 4          ;set the clock line high, start target sending data
+         bcf     status, c   ;shift in new bit, init it to 0
+         rlcf    reg0
+         rlcf    reg1
+         rlcf    reg2
+         skip_pgdlo 5        ;data line is low, data bit already set correctly ?
+         bsf     reg0, 0     ;no, set the new bit to 1
+         pgc_low 7           ;lower the clock line
+         decfsz  reg3        ;count one less bit left to do
+         jump    r24m_bit    ;back to receive the next bit
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine SERT_RECV14MSS24
+;
+;   Receive a 24 bit word from the target in most to least significant bit
+;   order, and with the appropriate start, stop, and padding for a 14 bit
+;   payload.  The 14 payload bits are returned in REG1:REG0.  The unused high
+;   bits are set to 0.
+;
+         glbsub  sert_recv14mss24, regf2
+
+         mcall   sert_recv24m ;receive the raw 24 bit word into REG2:REG1:REG0
+
+         rrcf    reg1        ;LSB-justify the payload bits
+         rrcf    reg0
+
+         movlw   h'3F'       ;mask in only the 14 payload bits
+         andwf   reg1
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine SERT_RECV8MSS24
+;
+;   Receive a 24 bit word from the target in most to least significant bit
+;   order, and with the appropriate start, stop, and padding for a 8 bit
+;   payload.  The 8 payload bits are returned in REG0.
+;
+         glbsub  sert_recv8mss24, regf1 | regf2
+
+         mcall   sert_recv24m ;receive the raw 24 bit word into REG2:REG1:REG0
+
+         rrcf    reg1        ;move the 8 bit payload into REG0
+         rrcf    reg0
+
+         leaverest
+
+         end

@@ -1,18 +1,29 @@
-;   ***************************************************************
-;   * Copyright (C) 2011, Embed Inc (http://www.embedinc.com)     *
-;   *                                                             *
-;   * Permission to copy this file is granted as long as this     *
-;   * copyright notice is included in its entirety at the         *
-;   * beginning of the file, whether the file is copied in whole  *
-;   * or in part and regardless of whether other information is   *
-;   * added to the copy.                                          *
-;   *                                                             *
-;   * The contents of this file may be used in any way,           *
-;   * commercial or otherwise.  This file is provided "as is",    *
-;   * and Embed Inc makes no claims of suitability for a          *
-;   * particular purpose nor assumes any liability resulting from *
-;   * its use.                                                    *
-;   ***************************************************************
+;   ****************************************************************
+;   * Copyright (C) 2011, Embed Inc (http://www.embedinc.com).     *
+;   * All rights reserved except as explicitly noted here.         *
+;   *                                                              *
+;   * Permission to copy this file is granted as long as this      *
+;   * copyright notice is included in its entirety at the          *
+;   * beginning of the file, whether the file is copied in whole   *
+;   * or in part and regardless of whether other information is    *
+;   * added to the copy, and one of the following conditions is    *
+;   * met:                                                         *
+;   *                                                              *
+;   *   1 - Any executable derived from the this file is only run  *
+;   *       on a Embed Inc product.                                *
+;   *                                                              *
+;   *   2 - Any device that contains executable code derived from  *
+;   *       this file is not sold, not distributed for commercial  *
+;   *       advantage, and not more than 10 (ten) instances of the *
+;   *       device are created.                                    *
+;   *                                                              *
+;   * To copy this file otherwise requires explicit permission     *
+;   * from Embed Inc and may also require a fee.                   *
+;   *                                                              *
+;   * The information in this file is provided "as is".  Embed Inc *
+;   * makes no claims of suitability for any particular purpose    *
+;   * nor assumes any liability resulting from its use.            *
+;   ****************************************************************
 ;
 ;   Common include file for the PIC programmer firmware builds.  This file is
 ;   intended to be included at the end of each project-specific include file.
@@ -46,29 +57,29 @@ adrbankadr equ   bankadr(adrbank) ;address within ADR_xxx variables bank
 /flag    rdcache             ;cached data read from target is valid
 /flag    ntohost             ;host input timeout disabled
 
-;*******************************************************************************
-;
-;   Preprocessor subroutine MAKEWAIT ms
-;
-;   Compute the number of system ticks to wait for to guarantee the minimum wait
-;   time of MS milliseconds.  The result is left in the integer preprocessor
-;   variable WTICKS.  To actually perform a wait, the WTICKS value must be
-;   loaded into NEXTWAIT, then WAIT_START and WAIT_WAIT called.
-;
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Preprocessor subroutine MAKEWAIT ms
+//
+//   Compute the number of system ticks to wait for to guarantee the minimum
+//   wait time of MS milliseconds.  The result is left in the integer
+//   preprocessor variable WTICKS.  To actually perform a wait, the WTICKS value
+//   must be loaded into NEXTWAIT, then WAIT_START and WAIT_WAIT called.
+//
 /subroutine makewait
   /var exist wticks integer  ;returned number of ticks to wait
   /var local ms real = [arg 1] ;minimum wait time in milliseconds
   /set wticks [+ [trunc [/ [* ms 1000] tickus]] 2] ;compute ticks to wait
   /endsub
 
-;*******************************************************************************
-;
-;   Macro SETWAIT ms
-;
-;   This macro computes the minimum number of clock tick that must elapse to
-;   guarantee a time of MS milliseconds has elapsed.  This value is loaded into
-;   NEXTWAIT, but no wait interval is started.
-;
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Macro SETWAIT ms
+//
+//   This macro computes the minimum number of clock tick that must elapse to
+//   guarantee a time of MS milliseconds has elapsed.  This value is loaded into
+//   NEXTWAIT, but no wait interval is started.
+//
 /macro setwait
   /call makewait [arg 1]     ;make ticks to wait in WTICKS
          dbankif gbankadr
@@ -76,23 +87,22 @@ adrbankadr equ   bankadr(adrbank) ;address within ADR_xxx variables bank
          loadk24 nextwait, [v wticks]
   /endmac
 
-;*******************************************************************************
-;
-;   Macro STARTWAIT ms
-;
-;   Start a wait interval that will be MS milliseconds long.  FLAG_DONE will
-;   be initialized to cleared, and will automatically be set when the
-;   wait interval elapses.  This macro only sets up the wait interval
-;   and finishes "quickly".  The actual wait time is rounded up within the
-;   available resolution to guarantee the wait time is never less than
-;   MS milliseconds.
-;
-;   The minimum wait is for two clock ticks to occur, thereby guaranteeing a
-;   wait of at least 1 clock tick period.
-;
-;   Processing of host commands that require operations on the target chip
-;   will be suspended until the wait interval elapses.
-;
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Macro STARTWAIT ms
+//
+//   Start a wait interval that will be MS milliseconds long.  FLAG_DONE will be
+//   initialized to cleared, and will automatically be set when the wait
+//   interval elapses.  This macro only sets up the wait interval and finishes
+//   "quickly".  The actual wait time is rounded up within the available
+//   resolution to guarantee the wait time is never less than MS milliseconds.
+//
+//   The minimum wait is for two clock ticks to occur, thereby guaranteeing a
+//   wait of at least 1 clock tick period.
+//
+//   Processing of host commands that require operations on the target chip will
+//   be suspended until the wait interval elapses.
+//
 /macro startwait
          setwait [arg 1]
          gcall   wait_start
@@ -102,10 +112,10 @@ adrbankadr equ   bankadr(adrbank) ;address within ADR_xxx variables bank
 ;
 ;   Macro START_WAIT_NEXT
 ;
-;   Start a new wait interval.  The number of ticks to wait must be
-;   in the 24 bit variable NEXTWAIT.  There must not currently be a wait
-;   interval in progress.  This means that on entry it is assumed that
-;   FLAG_DONE is set and CNTWAIT is zero.
+;   Start a new wait interval.  The number of ticks to wait must be in the 24
+;   bit variable NEXTWAIT.  There must not currently be a wait interval in
+;   progress.  This means that on entry it is assumed that FLAG_DONE is set and
+;   CNTWAIT is zero.
 ;
 start_wait_next macro
          gcall   wait_start
@@ -115,9 +125,9 @@ start_wait_next macro
 ;
 ;   Macro WAIT
 ;
-;   Wait for the current wait interval to elapse.  This marco will
-;   complete immediately if no wait interval is in progress, meaning
-;   the previous wait has already elapsed.
+;   Wait for the current wait interval to elapse.  This marco will complete
+;   immediately if no wait interval is in progress, meaning the previous wait
+;   has already elapsed.
 ;
 wait     macro
          gcall   wait_wait   ;perform the wait
@@ -127,9 +137,9 @@ wait     macro
 ;
 ;   Macro WAITMS ms
 ;
-;   Wait the indicated number of milliseconds.  The wait time will be
-;   rounded to the available resolution so that the actual wait is never
-;   less than the amount specified by the argument.
+;   Wait the indicated number of milliseconds.  The wait time will be rounded to
+;   the available resolution so that the actual wait is never less than the
+;   amount specified by the argument.
 ;
 ;   This macro is just a convenience wrapper around the SETWAITMS and WAIT
 ;   macros.

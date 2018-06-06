@@ -1,0 +1,261 @@
+;   ****************************************************************
+;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com).     *
+;   * All rights reserved except as explicitly noted here.         *
+;   *                                                              *
+;   * Permission to copy this file is granted as long as this      *
+;   * copyright notice is included in its entirety at the          *
+;   * beginning of the file, whether the file is copied in whole   *
+;   * or in part and regardless of whether other information is    *
+;   * added to the copy, and one of the following conditions is    *
+;   * met:                                                         *
+;   *                                                              *
+;   *   1 - Any executable derived from the this file is only run  *
+;   *       on a Embed Inc product.                                *
+;   *                                                              *
+;   *   2 - Any device that contains executable code derived from  *
+;   *       this file is not sold, not distributed for commercial  *
+;   *       advantage, and not more than 10 (ten) instances of the *
+;   *       device are created.                                    *
+;   *                                                              *
+;   * To copy this file otherwise requires explicit permission     *
+;   * from Embed Inc and may also require a fee.                   *
+;   *                                                              *
+;   * The information in this file is provided "as is".  Embed Inc *
+;   * makes no claims of suitability for any particular purpose    *
+;   * nor assumes any liability resulting from its use.            *
+;   ****************************************************************
+;
+;   Include file that implements the common parts of the programming algorithm
+;   for parts like the PIC 16F15313.  These parts use a rather different
+;   programming command set than the original PIC 16 or the similar "enhanced"
+;   PIC 16F1xxx.
+;
+;   The programming command set supported here uses 8 bit opcodes and 24 bit
+;   data words.  In contrast, the original 16F and the 16F1xxx both use 66 bit
+;   opcodes.
+;
+;   The program memory address space seems to be (addresses in HEX):
+;
+;     0000 - 7FFF   Program memory
+;     8000 - FFFF   Configration space
+;
+         extern  done_read   ;jump here when specific read routine done
+         extern  done_write  ;jump here when specific write routine done
+
+         extern  tadr        ;requested target chip address of operation
+         extern  tadri       ;actual internal target chip address
+         extern  nextwait    ;length of wait to set up on call to WAIT_START
+         extern  wbufsz      ;target chip write buffer size
+         extern  wbufen      ;last address covered by write buffer
+         extern_flags        ;declare global flag bits EXTERN
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+
+;   Programming mode opcodes.
+;
+/const   opc_adr integer = 16#80 ;set address
+/const   opc_ebulk integer = 16#18 ;bulk erase
+/const   opc_erow integer = 16#F0 ;row erase
+/const   opc_ldat integer = 16#00 ;load data for curr adr
+/const   opc_ldat_inc integer = 16#02 ;load data for curr adr, inc adr
+/const   opc_rdat integer = 16#FC ;get data at curr adr
+/const   opc_rdat_inc integer = 16#FE ;get data at curr adr, inc adr
+/const   opc_inc integer = 16#F8 ;increment address
+/const   opc_pgint integer = 16#E0 ;start programming, internally timed
+/const   opc_pgext integer = 16#C0 ;start programming, externally timed
+/const   opc_pgextend integer = 16#82 ;end externally timed programming
+         //
+         //   Also define MPASM constants also for each of the above opcodes.
+         //
+/loop symbols name const     ;loop over all constants
+  /var local sy string       ;base symbol name
+  /var local s string
+  /set sy [sym name name]    ;make bare name of this symbol
+  /if [< [slen sy] 5] then   ;too short to be "OPC_x" ?
+    /repeat
+    /endif
+  /if [<> [substr 1 4 sy] "opc_"] then ;doesn't start with "OPC_" ?
+    /repeat
+    /endif
+  /set s sy
+  /call tabopcode s
+  /set s [str s "equ"]
+  /call taboperand s
+  /set s [str s "h'" [int [chars sy] "fw 2 lz base 16 usin"] "'"]
+  /write s
+  /endloop
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+
+.f16b    code
+;*******************************************************************************
+;
+;   Local subroutine SET_ADR
+;
+;   Set the internal target chip address to match the desired address.  The
+;   desired address is in TADR and the current address internal to the target
+;   chip is TADRI.  These parts implement a 16 bit address space, so only the
+;   low 2 bytes of TADR and TADRI and used.  Any remaining higher address bytes
+;   should be set to 0, but are ignored by this routine.
+;
+         locsub  set_adr, regf0 | regf1
+;
+;   Check for whether the address needs to be set in the target.
+;
+         skip_flag tadrkn    ;the address in the target is known ?
+         jump    sa_set      ;no, go set it
+
+         dbankif gbankadr
+         movf    tadri+0, w  ;get curr adr low byte
+         xorwf   tadr+0, w   ;compare to desired adr low byte
+         bnz     sa_set      ;mismatch, go set adr ?
+         movf    tadri+1, w  ;get curr adr high byte
+         xorwf   tadr+1, w   ;compare to desired adr high byte
+         bz      sa_leave    ;address already set as desired, nothing to do ?
+;
+;   Explicitly set the address in the target chip.
+;
+sa_set   unbank
+         loadk8  reg0, opc_adr ;get opcode to set the address
+         gcall   sert_send8m ;send it
+
+         dbankif gbankadr
+         movf    tadr+0, w   ;get new adr low byte
+         movwf   tadri+0     ;update local copy of target address
+         movwf   reg0
+         movf    tadr+1, w   ;get new adr high byte
+         movwf   tadri+1     ;update local copy of target address
+         movwf   reg1
+         gcall   sert_send16mss24 ;send the new address to the target
+
+         setflag tadrkn      ;the address in the target is now known
+
+sa_leave unbank
+         leaverest
+
+;*******************************************************************************
+;
+;   Routine F16B_READ
+;
+;   Read the target chip data at address TADR.  The data is returned in the low
+;   bits of REG1:REG0 with unused high bits set to 0.  This routine must jump to
+;   DONE_READ when done.  REG2-REG3, REG8 may be trashed.
+;
+         glbent  f16b_read
+
+         mcall   set_adr     ;make sure target chip is at the desired address
+
+         loadk8  reg0, opc_rdat_inc ;opcode to read, then increment address
+         gcall   sert_send8m ;send it
+         gcall   sert_recv14mss24 ;get the result into REG1:REG0
+
+         gcall   op_inc_tadri ;update local copy of the target address
+
+         gjump   done_read
+
+;*******************************************************************************
+;
+;   Routine F16B_WRITE
+;
+;   Write the word in REG1:REG0 to the address in TADR.  This routine is
+;   specific to the 16F15313 and related parts.
+;
+;   Words are only written to holding registers in the chip unless the write is
+;   to the last word of a write page.  If so, the whole write page is written.
+;   Data is not actually written to the physical memory until the last word of
+;   the write page is written.
+;
+;   The address in the chip is incremented by one (and TADRI updated
+;   accordingly) for all but the last word of a write page.  For the last word,
+;   the address is not altered.
+;
+;   NEXTWAIT has been initialized with the TPROG value and CNTWAIT is zero (no
+;   wait interval in progress).  The OPn flags have all been cleared by OP_WRITE
+;   before the specific write routine is called.
+;
+;   This routine must jump to DONE_WRITE when done.
+;
+;   Allowed to trash REG0-REG3, REG8.
+;
+         glbent  f16b_write
+
+         mcall   set_adr     ;make sure target is set to the address to write to
+;
+;   Check for whether the write buffer applies.  If not, go do a single write.
+;
+         dbankif gbankadr
+         movf    tadr+0, w   ;get address low byte
+         subwf   wbufen+0, w ;compare to write buf limit low byte
+         movf    tadr+1, w   ;get address high byte
+         subwfb  wbufen+1, w ;compare to write buf limit high byte
+         skip_wle            ;this address is within the write buffer region
+         jump    wr_nbuf     ;no, go do a single write
+;
+;   Check whether this is the last word of a write buffer region.  If so, then
+;   go handle it specially.
+;
+         dbankif gbankadr
+         decf    wbufsz, w   ;get mask for offset within write buffer
+         movwf   reg2        ;temp save it
+         andwf   tadr+0, w   ;mask in only offset within write buffer
+         xorwf   reg2, w     ;compare to offset of last word
+         bz      wr_wbuf     ;go write this word and the whole buffer
+;
+;   This write is to a non-last word of the write buffer region.  Load the
+;   holding register and increment the target address, but don't perform a
+;   physical write.
+;
+         movff   reg0, reg2  ;temp save low byte of the data word
+         loadk8  reg0, opc_ldat_inc ;opcode to load data at curr adr, inc adr
+         gcall   sert_send8m ;send it
+
+         movff   reg2, reg0  ;restore the data word into REG1:REG0
+         gcall   sert_send14mss24 ;send the data
+
+         gcall   op_inc_tadri ;update local copy of the target address
+         gjump   done_write  ;all done
+;
+;   This write is to the last word of a write buffer region.  Load the holding
+;   register without incrementing the address, then do a physical write.  This
+;   type of write can be performed with either internally or externally timed
+;   programming.
+;
+wr_wbuf  unbank              ;write last word and whole write buffer
+         movff   reg0, reg2  ;temp save low byte of the data word
+         loadk8  reg0, opc_ldat ;opcode to load data at curr adr, no increment
+         gcall   sert_send8m ;send it
+
+         movff   reg2, reg0  ;restore the data word into REG1:REG0
+         gcall   sert_send14mss24 ;send the data
+
+         loadk8  reg0, opc_pgint ;start internally timed write
+         gcall   sert_send8m
+
+         start_wait_next     ;start the wait for the write to complete
+         gjump   done_write  ;all done
+;
+;   This write is past the region covered by write buffers.  A single word write
+;   is performed.  This type of write can only be performed with a internally
+;   timed write.
+;
+wr_nbuf  unbank              ;do single-word write outside of write buffer region
+         movff   reg0, reg2  ;temp save low byte of the data word
+         loadk8  reg0, opc_ldat ;opcode to load data at curr adr, no increment
+         gcall   sert_send8m ;send it
+
+         movff   reg2, reg0  ;restore the data word into REG1:REG0
+         gcall   sert_send14mss24 ;send the data
+
+         loadk8  reg0, opc_pgint ;start internally timed write
+         gcall   sert_send8m
+
+         startwait 6.0       ;extra long wait required for config words
+         gjump   done_write  ;all done

@@ -1,18 +1,29 @@
-;   ***************************************************************
-;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com)     *
-;   *                                                             *
-;   * Permission to copy this file is granted as long as this     *
-;   * copyright notice is included in its entirety at the         *
-;   * beginning of the file, whether the file is copied in whole  *
-;   * or in part and regardless of whether other information is   *
-;   * added to the copy.                                          *
-;   *                                                             *
-;   * The contents of this file may be used in any way,           *
-;   * commercial or otherwise.  This file is provided "as is",    *
-;   * and Embed Inc makes no claims of suitability for a          *
-;   * particular purpose nor assumes any liability resulting from *
-;   * its use.                                                    *
-;   ***************************************************************
+;   ****************************************************************
+;   * Copyright (C) 2008, Embed Inc (http://www.embedinc.com).     *
+;   * All rights reserved except as explicitly noted here.         *
+;   *                                                              *
+;   * Permission to copy this file is granted as long as this      *
+;   * copyright notice is included in its entirety at the          *
+;   * beginning of the file, whether the file is copied in whole   *
+;   * or in part and regardless of whether other information is    *
+;   * added to the copy, and one of the following conditions is    *
+;   * met:                                                         *
+;   *                                                              *
+;   *   1 - Any executable derived from the this file is only run  *
+;   *       on a Embed Inc product.                                *
+;   *                                                              *
+;   *   2 - Any device that contains executable code derived from  *
+;   *       this file is not sold, not distributed for commercial  *
+;   *       advantage, and not more than 10 (ten) instances of the *
+;   *       device are created.                                    *
+;   *                                                              *
+;   * To copy this file otherwise requires explicit permission     *
+;   * from Embed Inc and may also require a fee.                   *
+;   *                                                              *
+;   * The information in this file is provided "as is".  Embed Inc *
+;   * makes no claims of suitability for any particular purpose    *
+;   * nor assumes any liability resulting from its use.            *
+;   ****************************************************************
 ;
 ;   Low level procedural interface to the EEPROM.
 ;

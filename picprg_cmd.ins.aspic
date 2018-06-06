@@ -25,12 +25,11 @@
 ;   * nor assumes any liability resulting from its use.            *
 ;   ****************************************************************
 ;
-;   Include file that implements the common parts of the CMD
-;   module within various PIC programmer firmware types.  Each
-;   CMD module must still be customized to the particular project
-;   include file.  The common code that is project-independent
-;   is therefore included into the project-specific module using
-;   this include file.
+;   Include file that implements the common parts of the CMD module within
+;   various PIC programmer firmware types.  Each CMD module must still be
+;   customized to the particular project include file.  The common code that is
+;   project-independent is therefore included into the project-specific module
+;   using this include file.
 ;
 ;   The following facilities must be defined by the module referencing this
 ;   include file:
@@ -113,7 +112,7 @@
          sendbyte
          goto    cmd_done
     endif
-;
+
 ;*******************************************************************************
 ;
 ;   Commands for doing low level communication over the target clock and
@@ -212,6 +211,34 @@
          goto    cmd_done
     endif
 ;
+;   Command SEND8M data
+;
+  ifdef cm0send8m
+         command send8m
+         getbyte             ;get the data byte into REG0
+
+         waitdone            ;wait until done setting previous state
+         gcall   sert_send8m ;send the data bits
+         goto    cmd_done
+    endif
+;
+;   Command SEND24M data data data
+;
+  ifdef cm0send24m
+         command send24m
+         getbyte             ;get the data into REG2:REG1:REG0
+         movff   reg0, reg3
+         getbyte
+         movff   reg0, reg1
+         getbyte
+         movff   reg0, reg2
+         movff   reg3, reg0
+
+         waitdone            ;wait until done setting previous state
+         gcall   sert_send24m ;send the data bits
+         goto    cmd_done
+    endif
+;
 ;   Command RECV1 n
 ;
   ifdef cm0recv1
@@ -287,6 +314,22 @@
          movff   reg2, reg0
          sendbyte
          movff   reg3, reg0
+         sendbyte
+
+         goto    cmd_done
+    endif
+;
+;   Command RECV24M
+;
+  ifdef cm0recv24m
+         command recv24m
+
+         waitdone            ;wait until done setting previous state
+         gcall   sert_recv24M ;read the data bits into REG2:REG1:REG0
+         sendbyte            ;send the received data bits
+         movff   reg1, reg0
+         sendbyte
+         movff   reg2, reg0
          sendbyte
 
          goto    cmd_done
@@ -691,8 +734,8 @@
 ;
 ;   Command TPROG <time>
 ;
-;   Sets the programming write cycle delay time in units of timer 2
-;   ticks.  These default to 200uS but can be a different value if the programmer
+;   Sets the programming write cycle delay time in units of timer 2 ticks.
+;   These default to 200 us but can be a different value if the programmer
 ;   implements the proper GETCAP subcommand to indicate the tick time.
 ;
   ifdef cm0tprog
