@@ -43,13 +43,14 @@
          extern  nextwait    ;length of wait to set up on call to WAIT_START
          extern  wbufsz      ;target chip write buffer size
          extern  wbufen      ;last address covered by write buffer
+         extern  datadr      ;target address for start of data EEPROM
          extern_flags        ;declare global flag bits EXTERN
 
 ;*******************************************************************************
 ;
 ;   Configuration constants.
 ;
-/const   iprogms real = 5    ;ms to wait for internally time program to complete
+/const   iprogms real = 5    ;ms to wait for internally timed program to complete
 /const   endms   real = 0.100 ;ms to wait after explicit END PROGRAM command
 
 ;*******************************************************************************
@@ -63,7 +64,6 @@ cmd_end  res     1           ;opcode to end programming, when FLAG_OP1 set
 
 
 .f16e    code
-
 ;*******************************************************************************
 ;
 ;   Local subroutine SET_ADR
@@ -71,8 +71,14 @@ cmd_end  res     1           ;opcode to end programming, when FLAG_OP1 set
 ;   Set the internal target chip address to match the desired address.  The
 ;   desired address is in TADR and the current address internal to the target
 ;   chip is TADRI.  These parts implement a 16 bit address space, so only the
-;   low 2 bytes of TADR and TADRI and used.  Any remaining higher address bytes
+;   low 2 bytes of TADR and TADRI are used.  Any remaining higher address bytes
 ;   should be set to 0, but are ignored by this routine.
+;
+;   This version uses the commands:
+;
+;     RESET ADDRESS (22)
+;     LOAD CONFIGURATION (0)
+;     INCREMENT ADDRESS (6)
 ;
          locsub  set_adr, regf0 | regf1
 ;
@@ -172,6 +178,111 @@ sa_doneinc unbank            ;done incrementing current address to match desired
 
 ;*******************************************************************************
 ;
+;   Local subroutine SET_ADR183
+;
+;   Set the internal target chip address to match the desired address.  The
+;   desired address is in TADR and the current address internal to the target
+;   chip is TADRI.  These parts implement a 16 bit address space, so only the
+;   low 2 bytes of TADR and TADRI are used.  Any remaining higher address bytes
+;   should be set to 0, but are ignored by this routine.
+;
+;   This version is for the 16F183xx and probably others.  It uses the commands:
+;
+;     LOAD PC ADDRESS (29)
+;     INCREMENT ADDRESS (6)
+;
+         locsub  set_adr183, regf0 | regf1 | regf2
+;
+;   Get the actual target address corresponding to the desired address into
+;   REG1:REG0.  When in data space, the target address is offset by DATADR.
+;
+         dbankif gbankadr
+         movf    tadr+1, w   ;get app address high byte
+         movwf   reg1
+         movf    tadr+0, w   ;get app address low byte
+         movwf   reg0
+
+         skip_flag spdata    ;in data space ?
+         jump    sa183_prog  ;no, skip this section
+         movf    datadr+0, w ;get offset low byte
+         addwf   reg0        ;add it
+         movf    datadr+1, w ;get offset high byte
+         addwfc  reg1        ;add it
+sa183_prog
+;
+;   Check for the target address is unknown.
+;
+         skip_flag tadrkn    ;target address is known ?
+         jump    sa183_set   ;no, go explicitly set it
+;
+;   Check for the target address is already set as desired.  The desired target
+;   address is in REG1:REG0.
+;
+         dbankif gbankadr
+         movf    tadri+0, w  ;get current address low byte
+         xorwf   reg0, w     ;compare to desired address low byte
+         movwf   reg2        ;save result of low byte compare
+         movf    tadri+1, w  ;get current address high byte
+         xorwf   reg1, w     ;compare to desired address high byte
+         iorwf   reg2, w     ;merge with mismatch from low bytes
+         bz      sa183_leave ;address is already set, nothing more to do
+;
+;   Just increment the address instead of loading it explicitly if all the
+;   restrictions for that are met.  The desired address is in REG1:REG0 and the
+;   current target address in TADRI.
+;
+         dbankif gbankadr
+         ;
+         ;   Abort if the current and desired addresses are in different
+         ;   half-spaces.  Since the address space is 16 bits, that means the
+         ;   high bit of both addresses must be the same.
+         ;
+         movf    tadri+1, w
+         xorwf   reg1, w     ;compare both high address bytes
+         andlw   h'80'       ;mask in the half-space address bit
+         bnz     sa183_set   ;in different hals-spaces, go set adr explicitly ?
+         ;
+         ;   Abort if the desired address is not 1 plus the current address.
+         ;
+         incf    tadri+0, w  ;make curr adr + 1 low byte
+         movwf   reg2        ;temp save it
+         movlw   0
+         addwfc  tadri+1, w  ;make curr adr + 1 high byte
+         xorwf   reg1, w     ;compare high bytes
+         bnz     sa183_set   ;high bytes mismatch, go set adr explicitly ?
+         movf    reg2, w
+         xorwf   reg0, w     ;compare low bytes
+         bnz     sa183_set   ;low bytes mismatch, go set adr explicitly ?
+         ;
+         ;   Increment the address.
+         ;
+         movff   reg0, tadri+0 ;update local copy of the address in the target
+         movff   reg1, tadri+1
+
+         loadk8  reg0, 6     ;INCREMENT ADDRESS opcode
+         gcall   sert_send6
+         jump    sa183_leave
+;
+;   Explicitly load the target address with the desired address.  The desired
+;   target address is in REG1:REG0.
+;
+sa183_set unbank
+         movff   reg0, tadri+0 ;update local copy of the address in the target
+         movff   reg1, tadri+1
+
+         loadk8  reg0, 29    ;send LOAD PC ADDRESS command
+         gcall   sert_send6
+         movff   tadr+0, reg0 ;get the 22 payload bits to send
+         clrf    reg2
+         gcall   sert_send22ss ;send them in a 24 bit word
+
+         setflag tadrkn      ;indicate the target address is known
+
+sa183_leave unbank           ;common exit point
+         leaverest
+
+;*******************************************************************************
+;
 ;   Routine F16E_READ
 ;
 ;   Read the target chip data at address TADR.  The data is returned in the low
@@ -190,6 +301,49 @@ sa_doneinc unbank            ;done incrementing current address to match desired
          gcall   sert_send6  ;send it
 
          gcall   sert_recv14ss ;get the 14 data bits into low bits of REG1,REG0
+
+         gjump   done_read
+
+;*******************************************************************************
+;
+;   Routine F16E_READ183
+;
+;   Read the target chip data at address TADR.  The data is returned in the low
+;   bits of REG1:REG0 with unused high bits set to 0.  This routine must jump to
+;   DONE_READ when done.  REG2-REG3, REG8 may be trashed.
+;
+;   This version is for the 16F183xx and related.  Commands used:
+;
+;     READ DATA FROM NVM and increment address (36)  -  Used here directly.
+;
+;     LOAD PC ADDRESS (29)  -  Used via SET_ADR183.
+;     INCREMENT ADDRESS (6)
+;
+         glbent  f16e_read183
+
+         mcall   set_adr183  ;make sure target chip is at the desired address
+;
+;   Do the read.
+;
+         loadk8  reg0, 36    ;send command to read data and increment the address
+         gcall   sert_send6
+         gcall   sert_recv14ss ;get the 14 data bits into low bits of REG1,REG0
+;
+;   Update the local copy of the target address.  The increment read and
+;   increment command only increments within the existing memory address half
+;   space.
+;
+         dbankif gbankadr
+         movf    tadri+1, w  ;get starting address high byte
+         andlw   h'80'       ;mask in only the bit that will stay the same
+         movwf   reg2        ;save high address bit in REG2
+
+         incf    tadri+0     ;increment the low address byte
+         movlw   0
+         addwfc  tadri+1, w  ;make incremented address high byte
+         andlw   h'7F'       ;mask in only the bits that participate in increment
+         iorwf   reg2, w     ;restore the original high bit
+         movwf   tadri+1     ;set final updated high address byte
 
          gjump   done_read
 
@@ -334,5 +488,94 @@ cfg182x  unbank
          loadk8  cmd_prog, 8 ;BEGIN INTERNALLY TIMED PROGRAMMING
          clrflag op1         ;indicate to not issue programming end command
          jump    write_comm
+
+;*****************************
+;
+;   Subroutine WRITE_16F183XX
+;
+;   The data to write is in REG1:REG0, and the address to write it to in TADR.
+;   This routine must jump to DONE_WRITE when done.  REG0-REG3, REG8 may be
+;   trashed.  NEXTWAIT has been initialized with the TPROG value and CNTWAIT is
+;   zero (no wait interval in progress).  The OPn flags have all been cleared
+;   by OP_WRITE before the specific write routine is called.
+;   For the PIC 16F183xx and related.
+;
+;   This version is for the 16F183xx and related.
+;
+;   Commands used here directly:
+;
+;     LOAD DATA FOR NVM (2)
+;     LOAD DATA FOR NVM, increment adr (34)
+;     BEGIN EXTERNALLY TIMED PROGRAMMING (24)
+;     END PROGRAMMING (10)
+;     BEGIN INTERNALLY TIMED PROGRAMMING (8)
+;
+;   Commands used implicitly via SET_ADR183.
+;
+;     LOAD PC ADDRESS (29)
+;     INCREMENT ADDRESS (6)
+;
+         glbsub  write_16f183xx
+
+         mcall   set_adr183  ;make sure the target is set to the write address
+
+         dbankif gbankadr
+         btfsc   tadri+1, 7  ;in normal program memory space ?
+         jump    w183_config ;in config space
+;
+;   This is a normal program memory write.  These are done WBUFSZ words at a
+;   time.  For all but the last address in a write block, the data is written
+;   and the address incremented.  For the last address, the data is written
+;   without the address being incremented, and the actual write is performed.
+;
+         dbankif gbankadr
+         decf    wbufsz, w   ;make mask for offset into write buffer
+         movwf   reg2        ;temp save it
+         andwf   tadr+0, w   ;make offset into write buffer
+         xorwf   reg2, w     ;compare to offset for last word
+         bz      w183_prog_last ;writing last location in the write buffer
+         ;
+         ;   Writing to other than the last location in the write buffer.
+         ;
+         movff   reg0, reg2  ;temp save low byte of data
+         loadk8  reg0, 34    ;opcode LOAD DATA FOR NVM, increment address
+         gcall   sert_send6  ;send it
+         movff   reg2, reg0  ;restore write data into REG1:REG0
+         gcall   sert_send14ss ;send the data to write
+         gcall   op_inc_tadri ;indicate target address was incremented
+         gjump   done_write
+         ;
+         ;   Writing to the last word of the write buffer.
+         ;
+w183_prog_last dbankis gbankadr
+         movff   reg0, reg2  ;temp save low byte of data
+         loadk8  reg0, 2     ;opcode LOAD DATA FOR NVM (not increment adr)
+         gcall   sert_send6  ;send it
+         movff   reg2, reg0  ;restore write data into REG1:REG0
+         gcall   sert_send14ss ;send the data to write
+
+         loadk8  reg0, 24    ;opcode BEGIN EXTERNALLY TIMED PROGRAMMING
+         gcall   sert_send6  ;start the flash write
+         gcall   wait_start  ;start the wait to time the flash write
+         loadk8  reg0, 10    ;opcode END PROGRAMMING
+         gcall   wait_wait   ;wait for the flash write to complete
+         gcall   sert_send6  ;end the flash write
+         startwait 0.300     ;guarantee high voltage discharge time
+         clrflag tadrkn      ;block write seems to corrupt the address
+         gjump   done_write
+;
+;   Writing to config space.
+;
+w183_config dbankis gbankadr
+         movff   reg0, reg2  ;temp save low byte of data
+         loadk8  reg0, 2     ;opcode LOAD DATA FOR NVM, don't increment address
+         gcall   sert_send6  ;send it
+         movff   reg2, reg0  ;restore write data into REG1:REG0
+         gcall   sert_send14ss ;send the data to write
+
+         loadk8  reg0, 8     ;opcode BEGIN INTERNALLY TIMED PROGRAMMING
+         gcall   sert_send6  ;start the write
+         startwait 5.0       ;start the wait to time the write
+         gjump   done_write
 
          end

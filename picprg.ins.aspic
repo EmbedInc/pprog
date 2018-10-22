@@ -35,6 +35,13 @@
 ;
 adrbank  equ     1           ;bank for ADR_xxx variables
 ;
+;   UART debug response opcodes.
+;
+/const   rsp_nop integer = 0 ;NOP
+/const   rsp_opc6 integer = 1 ;6 bit opcode being sent
+/const   rsp_dat14 integer = 2 ;14 bit data in 16 bit word
+/const   rsp_dat22 integer = 3 ;22 bit data in 24 bit word
+;
 ;   Derived constants.
 ;
 adrbankadr equ   bankadr(adrbank) ;address within ADR_xxx variables bank
@@ -76,7 +83,7 @@ adrbankadr equ   bankadr(adrbank) ;address within ADR_xxx variables bank
 //
 //   Macro SETWAIT ms
 //
-//   This macro computes the minimum number of clock tick that must elapse to
+//   This macro computes the minimum number of clock ticks that must elapse to
 //   guarantee a time of MS milliseconds has elapsed.  This value is loaded into
 //   NEXTWAIT, but no wait interval is started.
 //

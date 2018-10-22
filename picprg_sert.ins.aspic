@@ -58,6 +58,57 @@
 ;       Flag TDRIVE is set if the target is driving the line, and cleared if
 ;       not.
 ;
+/if [not [exist "debug_cmduart"]] then
+  /const debug_cmduart bool = false
+  /endif
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Subroutines for sending data out the UART.  These are only enabled when the
+//   debug switch DEBUG_CMDUART is TRUE.
+//
+/if debug_cmduart then
+
+;*****************************
+;
+;   Subroutine USEND16
+;
+;   Send the 16 bit word in REG1:REG0.
+;
+         locsub  usend16, regf4
+
+         movff   reg0, reg4  ;temp save low byte
+         movff   reg1, reg0  ;send high byte
+         gcall   uart_put
+         movff   reg4, reg0  ;send low byte, restore REG0
+         gcall   uart_put
+
+         leaverest
+
+;*****************************
+;
+;   Subroutine USEND24
+;
+;   Send the 24 bit word in REG2:REG1:REG0.
+;
+         locsub  usend24, regf4
+
+         movff   reg0, reg4  ;temp save low byte
+
+         movff   reg2, reg0  ;send high byte
+         gcall   uart_put
+         movff   reg1, reg0  ;send middle byte
+         gcall   uart_put
+         movff   reg4, reg0  ;send low byte, restore REG0
+         gcall   uart_put
+
+         leaverest
+
+  /endif                     ;end of UART debug output utility routines
+//
+//   End of utility subroutines for sending debug info over UART.
+//
+////////////////////////////////////////////////////////////////////////////////
 
 ;*******************************************************************************
 ;
@@ -225,8 +276,15 @@ send_leave unbank            ;jump here on done sending all bits
 ;
          glbsub  sert_send6, regf8
 
-         movlw   6           ;pass number of bits to send
-         movwf   reg8
+/if debug_cmduart then
+         movff   reg0, reg8  ;temp save REG0
+         loadk8  reg0, [v rsp_opc6]
+         gcall   uart_put    ;indicate programming opcode to follow
+         movff   reg8, reg0  ;get programming opcode, restore REG0
+         gcall   uart_put    ;send the programming opcode
+  /endif
+
+         loadk8  reg8, 6     ;pass the number of bits to send
          mcall   sert_send   ;send the bits
 
          leaverest
@@ -246,9 +304,44 @@ send_leave unbank            ;jump here on done sending all bits
          bcf     reg0, 0     ;set the start bit to 0
          bcf     reg1, 7     ;set the stop bit to 0
 
-         movlw   16          ;pass the number of bits to send
-         movwf   reg8
+/if debug_cmduart then
+         movff   reg0, reg8  ;temp save REG0
+         loadk8  reg0, [v rsp_dat14]
+         gcall   uart_put    ;DAT14 opcode
+         movff   reg8, reg0  ;restore REG0
+         mcall   usend16     ;send the data
+  /endif
 
+         loadk8  reg8, 16    ;pass the number of bits to send
+         mcall   sert_send   ;send the bits
+
+         leaverest
+
+;*******************************************************************************
+;
+;   Subroutine SERT_SEND22SS
+;
+;   Send the 22 data bits in the low bits of REG2:REG1:REG0 to the target.  The
+;   data bits will be surrounded by a 0 start and stop bit, for a total of 24
+;   bits sent.
+;
+         glbsub  sert_send22ss, regf0 | regf1 | regf2 | regf8
+
+         rlcf    reg0        ;move the 22 data bits into position
+         rlcf    reg1
+         rlcf    reg2
+         bcf     reg0, 0     ;set the start bit to 0
+         bcf     reg2, 7     ;set the stop bit to 0
+
+/if debug_cmduart then
+         movff   reg0, reg8  ;temp save REG0
+         loadk8  reg0, [v rsp_dat22]
+         gcall   uart_put    ;DAT22 opcode
+         movff   reg8, reg0  ;restore REG0
+         mcall   usend24     ;send the data
+  /endif
+
+         loadk8  reg8, 24    ;pass the number of bits to send
          mcall   sert_send   ;send the bits
 
          leaverest

@@ -656,7 +656,9 @@ reset_24 unbank              ;common part of PIC 24 and 33 reset
 ;   Table of routines that implement each of the specific algorithms.
 ;
          extern  f16_read, f16e_read, f16b_read, f18_read, core12_read, f30_read
-         startop alg_read, 7
+         extern  f16e_read183
+
+         startop alg_read, 8
 
          tblent  f16_read    ;1 - for 16Fxxx
          tblent  f18_read    ;2 - generic 18F, program space only
@@ -665,6 +667,7 @@ reset_24 unbank              ;common part of PIC 24 and 33 reset
          tblent  f18_read    ;5 - generic 18F, program and EEPROM space
          tblent  f16e_read   ;6 - for enhanced (4 digit) 16F
          tblent  f16b_read   ;7 - 8 bit opcodes, 24 bit data, like 16F15313
+         tblent  f16e_read183 ;8 - 16F183xx and related
 ;
 ;   Illegal algorithm ID or no algorithm set.
 ;
@@ -698,8 +701,8 @@ reset_24 unbank              ;common part of PIC 24 and 33 reset
          extern  f16_write, write_12f6, core12_write, f30_write
          extern  write_16f87xa, write_16f716, write_16f688, write_18f2520
          extern  write_16f88, write_16f77, write_16f88x, write_16f182x
-         extern  f16b_write
-         startop alg_write, 13
+         extern  f16b_write, write_16f183xx
+         startop alg_write, 14
 
          tblent  f16_write   ;1 - for 16Fxxx
          tblent  write_12f6  ;2 - for 12F6xx
@@ -714,6 +717,7 @@ reset_24 unbank              ;common part of PIC 24 and 33 reset
          tblent  write_16f88x ;11 - BEGIN PROG 24, END PROG 10
          tblent  write_16f182x ;12 - BEGIN 24 and END 10, config BEGIN 8
          tblent  f16b_write  ;13 - for 16F with 8 bit prog commands, like 16F15313
+         tblent  write_16f183xx ;14 - for 16F183xx and related
 ;
 ;   Illegal algorithm ID or no algorithm set.
 ;
