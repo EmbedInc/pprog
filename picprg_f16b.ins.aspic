@@ -53,7 +53,8 @@
 ;
 ;   Configuration constants.
 ;
-
+topc     equ     1000        ;ns wait after each opcode
+;
 ;   Programming mode opcodes.
 ;
 /const   opc_adr integer = 16#80 ;set address
@@ -68,7 +69,7 @@
 /const   opc_pgext integer = 16#C0 ;start programming, externally timed
 /const   opc_pgextend integer = 16#82 ;end externally timed programming
          //
-         //   Also define MPASM constants also for each of the above opcodes.
+         //   Also define MPASM constants for each of the above opcodes.
          //
 /loop symbols name const     ;loop over all constants
   /var local sy string       ;base symbol name
@@ -93,9 +94,26 @@
 ;   Local state.
 ;
          defram  lbankadr
+opc_save res     1           ;temp save for SENDOPC macro only
 
 
 .f16b    code
+;*******************************************************************************
+;
+;   Macro SENDOPC opc
+;
+;   Send the opcode OPC to the target.  The REGn registers and the current bank
+;   setting are preserved.
+;
+sendopc  macro   opc
+         movff   reg0, opc_save ;temp save REG0
+         movlw   opc         ;get the opcode into REG0
+         movwf   reg0
+         gcall   sert_send8m ;send the opcode
+         movff   opc_save, reg0 ;restore REG0
+         waitns  1000, 2     ;guarantee minimum wait after opcode
+         endm
+
 ;*******************************************************************************
 ;
 ;   Local subroutine SET_ADR
@@ -124,8 +142,8 @@
 ;   Explicitly set the address in the target chip.
 ;
 sa_set   unbank
-         loadk8  reg0, opc_adr ;get opcode to set the address
-         gcall   sert_send8m ;send it
+         wait                ;wait for any previous operation to complete
+         sendopc opc_adr     ;SET ADDRESS opcode
 
          dbankif gbankadr
          movf    tadr+0, w   ;get new adr low byte
@@ -153,12 +171,11 @@ sa_leave unbank
 
          mcall   set_adr     ;make sure target chip is at the desired address
 
-         loadk8  reg0, opc_rdat_inc ;opcode to read, then increment address
-         gcall   sert_send8m ;send it
+         wait                ;wait for any previous operation to complete
+         sendopc opc_rdat_inc ;opcode to read, then increment address
          gcall   sert_recv14mss24 ;get the result into REG1:REG0
 
          gcall   op_inc_tadri ;update local copy of the target address
-
          gjump   done_read
 
 ;*******************************************************************************
@@ -213,11 +230,8 @@ sa_leave unbank
 ;   holding register and increment the target address, but don't perform a
 ;   physical write.
 ;
-         movff   reg0, reg2  ;temp save low byte of the data word
-         loadk8  reg0, opc_ldat_inc ;opcode to load data at curr adr, inc adr
-         gcall   sert_send8m ;send it
-
-         movff   reg2, reg0  ;restore the data word into REG1:REG0
+         wait                ;wait for any previous operation to complete
+         sendopc opc_ldat_inc ;opcode to load data at curr adr, inc adr
          gcall   sert_send14mss24 ;send the data
 
          gcall   op_inc_tadri ;update local copy of the target address
@@ -229,15 +243,11 @@ sa_leave unbank
 ;   programming.
 ;
 wr_wbuf  unbank              ;write last word and whole write buffer
-         movff   reg0, reg2  ;temp save low byte of the data word
-         loadk8  reg0, opc_ldat ;opcode to load data at curr adr, no increment
-         gcall   sert_send8m ;send it
-
-         movff   reg2, reg0  ;restore the data word into REG1:REG0
+         wait                ;wait for any previous operation to complete
+         sendopc opc_ldat    ;opcode to load data at curr adr, no increment
          gcall   sert_send14mss24 ;send the data
 
-         loadk8  reg0, opc_pgint ;start internally timed write
-         gcall   sert_send8m
+         sendopc opc_pgint   ;start internally timed write
 
          start_wait_next     ;start the wait for the write to complete
          gjump   done_write  ;all done
@@ -247,15 +257,10 @@ wr_wbuf  unbank              ;write last word and whole write buffer
 ;   timed write.
 ;
 wr_nbuf  unbank              ;do single-word write outside of write buffer region
-         movff   reg0, reg2  ;temp save low byte of the data word
-         loadk8  reg0, opc_ldat ;opcode to load data at curr adr, no increment
-         gcall   sert_send8m ;send it
-
-         movff   reg2, reg0  ;restore the data word into REG1:REG0
+         wait                ;wait for any previous operation to complete
+         sendopc opc_ldat    ;opcode to load data at curr adr, no increment
          gcall   sert_send14mss24 ;send the data
 
-         loadk8  reg0, opc_pgint ;start internally timed write
-         gcall   sert_send8m
-
+         sendopc opc_pgint   ;start internally timed write
          startwait 6.0       ;extra long wait required for config words
          gjump   done_write  ;all done
