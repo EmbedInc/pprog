@@ -31,7 +31,7 @@
 ;   PIC 16F1xxx.
 ;
 ;   The programming command set supported here uses 8 bit opcodes and 24 bit
-;   data words.  In contrast, the original 16F and the 16F1xxx both use 66 bit
+;   data words.  In contrast, the original 16F and the 16F1xxx both use 6 bit
 ;   opcodes.
 ;
 ;   The program memory address space seems to be (addresses in HEX):

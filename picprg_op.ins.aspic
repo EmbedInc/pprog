@@ -360,6 +360,7 @@ tblent   macro   adr
          tblent  reset_24fj  ;10 - sets FLAG_24H and specific NVMCON values
          tblent  reset_18k80 ;11 - Vdd, then Vpp, then 32 bit signature
          tblent  reset_33ep  ;12 - 24EP, 33EP, signature, extra wait times and NOPs
+         tblent  reset_16f153xx ;13 - Vpp low, MCHP signature MSB to LSB
 
 res_done unbank              ;back here after local reset algorithm performed
 ;
@@ -434,8 +435,8 @@ reset_vdvp_unk unbank        ;target address becomes unknown
 ;
 ;     2 - Wait a minimum of 250us.
 ;
-;     3 - Clock the 32 bit value 4D434850h into the device using PGC and PGD
-;         normally.
+;     3 - Clock the 32 bit value 4D434850h ("MCHP") into the device in LSB to
+;         MSB order using PGC and PGD normally.
 ;
 ;     4 - Perform one additional clock.
 ;
@@ -458,11 +459,38 @@ reset_16f182x unbank
          wait
   /endif
 
-         loadk32 reg0, h'4D434850' ;send special unlock sequence
+         loadk32 reg0, h'4D434850' ;"MCHP" unlock sequence
          loadk8  reg8, 32
          gcall   sert_send
          loadk8  reg0, 0     ;do one additional clock by sending a 0 bit
          loadk8  reg8, 1
+         gcall   sert_send
+
+         jump    res_done    ;done with selected reset algorithm
+
+;**********
+;
+;   RESET_16F153XX
+;
+;   For the 16F153xx devices and probably others.  The sequence is:
+;
+;     1 - Make sure Vpp is low.
+;
+;     2 - Turn on Vdd.
+;
+;     3 - Clock the 32 bit value 4D434850h ("MCHP") into the device in MSB to
+;         LSB order using PGC and PGD normally.
+;
+reset_16f153xx unbank
+         dbankif gbankadr
+         bsf     flag_tadrkn ;target address will be known
+         gcall   vpp_zero    ;make sure Vpp is low
+         wait
+         gcall   vdd_on      ;make sure Vdd is on
+         wait
+
+         loadk32 reg0, h'0A12C2B2' ;"MCHP" with high bit in LSB
+         loadk8  reg8, 32
          gcall   sert_send
 
          jump    res_done    ;done with selected reset algorithm
@@ -478,8 +506,8 @@ reset_16f182x unbank
 ;
 ;     2 - Blip Vpp for a short time.
 ;
-;     3 - Clock the 32 bit value 4D434850h into the device using PGC and PGD
-;         normally.
+;     3 - Clock the 32 bit value 4D434850h ("MCHP") into the device in MSB to
+;         LSB order using PGC and PGD normally.
 ;
 ;     4 - Raise Vpp.
 ;
@@ -494,7 +522,7 @@ reset_18j unbank
          wait
          gcall   vpp_blip    ;produce short positive glitch on Vpp
 
-         loadk32 reg0, h'0A12C2B2' ;send special unlock sequence
+         loadk32 reg0, h'0A12C2B2' ;"MCHP" with high bit in LSB
          loadk8  reg8, 32
          gcall   sert_send
 
@@ -513,8 +541,8 @@ reset_18j unbank
 ;
 ;     2 - Raise Vpp to high voltage.
 ;
-;     3 - Clock the 32 bit value 4D434850h into the device using PGC and PGD
-;         normally.
+;     3 - Clock the 32 bit value 4D434850h ("MCHP") into the device in LSB to
+;         MSB order using PGC and PGD normally.
 ;
 reset_18k80 unbank
          dbankif gbankadr
