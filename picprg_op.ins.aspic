@@ -346,7 +346,7 @@ tblent   macro   adr
 ;
 ;   Table of routines that implement each of the specific algorithms.
 ;
-         startop alg_reset, 12
+         startop alg_reset, 13
 
          tblent  reset_vpp_vdd ;1 - Vpp on before Vdd, adr reset to TADRR
          tblent  reset_vdd_vpp ;2 - Vdd on before Vpp, adr reset to TADRR
@@ -368,7 +368,7 @@ res_done unbank              ;back here after local reset algorithm performed
 ;   routines to perform additional operations, if any.
 ;
          extern  f30_reset
-         startop alg_reset, 12
+         startop alg_reset, 13
 
          tblent  done_reset  ;1
          tblent  done_reset  ;2
@@ -382,6 +382,7 @@ res_done unbank              ;back here after local reset algorithm performed
          tblent  f30_reset   ;10 - PIC 24FJ
          tblent  done_reset  ;11
          tblent  f30_reset   ;12 - 24EP, 33EP
+         tblent  done_reset  ;13
 
          glbent  done_reset  ;selected algorithm routines jump here when done
          leaverest
