@@ -1,0 +1,306 @@
+;   ****************************************************************
+;   * Copyright (C) 2022, Embed Inc (http://www.embedinc.com).     *
+;   * All rights reserved except as explicitly noted here.         *
+;   *                                                              *
+;   * Permission to copy this file is granted as long as this      *
+;   * copyright notice is included in its entirety at the          *
+;   * beginning of the file, whether the file is copied in whole   *
+;   * or in part and regardless of whether other information is    *
+;   * added to the copy, and one of the following conditions is    *
+;   * met:                                                         *
+;   *                                                              *
+;   *   1 - Any executable derived from the this file is only run  *
+;   *       on a Embed Inc product.                                *
+;   *                                                              *
+;   *   2 - Any device that contains executable code derived from  *
+;   *       this file is not sold, not distributed for commercial  *
+;   *       advantage, and not more than 10 (ten) instances of the *
+;   *       device are created.                                    *
+;   *                                                              *
+;   * To copy this file otherwise requires explicit permission     *
+;   * from Embed Inc and may also require a fee.                   *
+;   *                                                              *
+;   * The information in this file is provided "as is".  Embed Inc *
+;   * makes no claims of suitability for any particular purpose    *
+;   * nor assumes any liability resulting from its use.            *
+;   ****************************************************************
+;
+;   Include file that implements the common parts of the programming algorithm
+;   for target chips like the PIC 18F25Q10.  These parts use a rather different
+;   programming command set than the original PIC 16 or 18.
+;
+;   The programming command set supported here uses 8 bit opcodes and 24 bit
+;   data words.  In contrast, the original 16F and the 16F1xxx both use 6 bit
+;   opcodes.
+;
+;   The program memory address space is partioned (addresses in HEX):
+;
+;     00 0000  -  1F FFFF  Program memory
+;     20 0000  -  20 xxxx  User ID words
+;     30 0000  -  30 000F  Configuration words
+;     31 0000  -  31 xxxx  EEPROM
+;     3F FFFC  -  3F FFFD  Chip revision (fixed in silicon)
+;     3F FFFE  -  3F FFFF  Chip ID (fixed in silicon)
+;
+         extern  done_read   ;jump here when specific read routine done
+         extern  done_write  ;jump here when specific write routine done
+
+         extern  tadr        ;requested target chip address of operation
+         extern  tadri       ;local copy of address in target chip
+         extern  nextwait    ;length of wait to set up on call to WAIT_START
+         extern  datadr      ;start adr of EEPROM mapped into program memory
+         extern_flags        ;declare global flag bits EXTERN
+
+;*******************************************************************************
+;
+;   Configuration constants.
+;
+/const   tdly    real = 1.0e-6 ;min wait after opcode, seconds
+
+tdlyns   equ     [rnd [* tdly 1e9]] ;TDLY in ns
+;
+;   Programming opcodes.
+;
+/const   opc_adr integer = 16#80 ;set address
+/const   opc_ebulk integer = 16#18 ;bulk erase
+/const   opc_rdat integer = 16#FC ;get data at curr adr
+/const   opc_rdat_inc integer = 16#FE ;get data at curr adr, inc adr
+/const   opc_wdat integer = 16#C0 ;load data for curr adr
+/const   opc_wdat_inc integer = 16#E0 ;load data for curr adr, inc adr
+/const   opc_inc integer = 16#F8 ;increment address
+         //
+         //   Also define MPASM constants for each of the above opcodes.
+         //
+/loop symbols name const     ;loop over all constants
+  /var local sy string       ;base symbol name
+  /var local s string
+  /set sy [sym name name]    ;make bare name of this symbol
+  /if [< [slen sy] 5] then   ;too short to be "OPC_x" ?
+    /repeat
+    /endif
+  /if [<> [substr 1 4 sy] "opc_"] then ;doesn't start with "OPC_" ?
+    /repeat
+    /endif
+  /set s sy
+  /call tabopcode s
+  /set s [str s "equ"]
+  /call taboperand s
+  /set s [str s "h'" [int [chars sy] "fw 2 lz base 16 usin"] "'"]
+  /write s
+  /endloop
+
+;*******************************************************************************
+;
+;   Local state.
+;
+         defram  lbankadr
+
+
+.f18b    code
+;*******************************************************************************
+;
+;   Macro SENDOPC opc
+;
+;   Send the opcode OPC to the target.  The REGn registers are preserved.
+;
+sendopc  macro   opc
+         pushreg reg0        ;temp save REG0 before trashing it
+         loadk8  reg0, opc   ;get the opcode into REG0
+         gcall   sert_send8m ;send the opcode
+         popreg  reg0        ;restore the original REG0
+         endm
+
+/const   opccy   integer = 3 ;min cycles after macro since opcode sent
+
+////////////////////////////////////////////////////////////////////////////////
+//
+//   Macro OPCWAIT cy
+//
+//   Make sure a minimum of TDLY seconds have elapsed since the end of sending
+//   the last opcode.  CY is the cycles since the SENDOPC macro.
+//
+/macro opcwait
+         waitns  tdlyns, [+ [arg 1] opccy] ;do the wait
+  /endmac
+
+;*******************************************************************************
+;
+;   Local subroutine SET_ADR
+;
+;   Set the internal target chip address to match the desired address.  The
+;   desired address is in TADR and the current address internal to the target
+;   chip is TADRI.
+;
+         locsub  set_adr, regf0 | regf1 | regf2
+;
+;   Check for whether the address needs to be set in the target.
+;
+         skip_flag tadrkn    ;the address in the target is known ?
+         jump    sa_set      ;no, go set it
+
+         dbankif gbankadr
+         movf    tadri+0, w  ;get curr adr low byte
+         xorwf   tadr+0, w   ;compare to desired adr low byte
+         bnz     sa_set      ;mismatch, go set adr ?
+
+         movf    tadri+1, w  ;get curr adr high byte
+         xorwf   tadr+1, w   ;compare to desired adr high byte
+         bnz     sa_set      ;mismatch, go set adr ?
+
+         movf    tadri+2, w  ;get curr adr upper byte
+         xorwf   tadr+2, w   ;compare to desired adr upper byte
+         bz      sa_leave    ;address already set as desired, nothing to do ?
+;
+;   Explicitly set the address in the target chip.
+;
+sa_set   unbank
+         wait                ;wait for any previous operation to complete
+         sendopc opc_adr     ;SET ADDRESS opcode
+         ;
+         ;   Update TADRI to TADR, and also get the address into REG2:REG1:REG0.
+         ;
+         dbankif gbankadr
+         movf    tadr+0, w   ;get new adr low byte
+         movwf   tadri+0     ;update local copy of target address
+         movwf   reg0
+         movf    tadr+1, w   ;get new adr high byte
+         movwf   tadri+1     ;update local copy of target address
+         movwf   reg1
+         movf    tadr+2, w   ;get new adr upper byte
+         movwf   tadri+2     ;update local copy of target address
+         movwf   reg2
+         ;
+         ;   Add DATADR to the address to send if in data (EEPROM) space, not
+         ;   program memory space.  EEPROM contents is mapped to EEADR in the
+         ;   program memory address space.
+         ;
+         skip_flag spdata    ;in data (EEPROM) space ?
+         jump    sa_dspdat   ;no, skip this section
+
+         dbankif gbankadr
+         movf    datadr+0, w ;add offset for EEPROM in prog mem adr space
+         addwf   reg0
+         movf    datadr+1, w
+         addwfc  reg1
+         movf    datadr+2, w
+         addwfc  reg2
+sa_dspdat unbank             ;done handling in data space
+         ;
+         ;   Send the 22 bit address in the 24-bit data word.  The opcode to set
+         ;   the PC has already been sent.  The data to send is the 22 bit
+         ;   address in REG2:REG1:REG0.  This must be shifted left one bit to be
+         ;   sent as the 24 bit data word for the opcode.
+         ;
+         bcf     status, c   ;set bit to shift in to 0
+         rlcf    reg0        ;shift 22 bit address left one bit
+         rlcf    reg1
+         rlcf    reg2
+         opcwait 18          ;guarantee minimum wait after opcode
+         gcall   sert_send24m ;send the 24 data bits after the opcode
+
+         setflag tadrkn      ;the address in the target is now known
+
+         waitns  tdlyns, 8   ;guarantee min wait after sending address
+
+sa_leave unbank
+         leaverest
+
+;*******************************************************************************
+;
+;   Routine F18B_READ
+;
+;   Read the target chip data at address TADR.  The data is returned in the low
+;   bits of REG1:REG0 with unused high bits set to 0.  This routine must jump to
+;   DONE_READ when done.
+;
+;   Allowed to trash REG2-REG3, REG8.
+;
+         glbent  f18b_read
+
+         mcall   set_adr     ;make sure target chip is at the desired address
+
+         wait                ;wait for any previous operation to complete
+         sendopc opc_rdat_inc ;read at curr address, increment address
+         opcwait 2           ;guarantee min wait after opcode
+         gcall   sert_recv24m ;get the raw data word into REG2:REG1:REG0
+
+         gcall   op_inc_tadri ;add 1 to local copy of target address
+         skip_nflag spdata   ;in program memory address space ?
+         jump    rd_spdata   ;no, in data (EEPROM) address space
+;
+;   Reading program memory.  The data is 16 bits wide, and the target address is
+;   advanced by 2.  The local copy of the target address has already been
+;   incremented by 1.
+;
+         gcall   op_inc_tadri ;add another 1 to local copy of target address
+
+         rrcf    reg2        ;return 16 bit data value in REG1:REG0
+         rrcf    reg1
+         rrcf    reg0
+
+         gjump   done_read
+;
+;   Reading data memory.  The data is 8 bits wide, and the target address is
+;   advanced by 1.  The local copy of the target address has already been
+;   incremented by 1.
+;
+rd_spdata
+         rrcf    reg1        ;get the 8 bit data value into REG0
+         rrcf    reg0
+         clrf    reg1        ;set remaining bits of returned value to 0
+
+         gjump   done_read
+
+;*******************************************************************************
+;
+;   Routine F18B_WRITE
+;
+;   Write the word in REG1:REG0 to the address in TADR.
+;
+;   NEXTWAIT has been initialized with the TPROG value.  The OPn flags have all
+;   been cleared by OP_WRITE before the specific write routine is called.
+;
+;   This routine must jump to DONE_WRITE when done.
+;
+;   Allowed to trash REG0-REG3, REG8.
+;
+         glbent  f18b_write
+;
+;   Make sure the target chip address is set to the word to write.
+;
+         mcall   set_adr     ;make sure target chip is at the desired address
+;
+;   Send opcode that writes to the current location then increments the address.
+;
+         wait                ;wait for any previous operation to complete
+         sendopc opc_wdat_inc ;opcode for write to curr address, increment address
+;
+;   Send the 24 bit data following the opcode.  The actual data to write is
+;   shifted left 1 bit within the 24 bit word, with unused bits set to 0.
+;
+         bcf     status, c   ;set value of bit to shift in to 0
+         rlcf    reg0        ;shift the write value into place
+         rlcf    reg1
+         rlcf    reg2
+         movlw   h'01'       ;mask off unused high bits
+         andlw   reg2
+
+         opcwait 9           ;guarantee min wait after opcode
+         gcall   sert_send24m ;send the 24 bits in REG2:REG1:REG0
+         start_wait_next     ;start the wait for the write to complete
+;
+;   Increment our local copy of the current address to match that now in the
+;   target chip.  The opcode caused the target address to increment by 2 when
+;   writing to normal program memory, and 1 when writing to EEPROM.
+;
+         movlw   2           ;init increment amount for program memory
+         skip_nflag spdata   ;really are in program memory space ?
+         movlw   1           ;no, get increment for data space
+
+         dbankif gbankadr
+         addwf   tadri+0     ;increment local copy of target address by W
+         movlw   0
+         addwfc  tadri+1
+         addwfc  tadri+2
+
+         gjump   done_write  ;all done

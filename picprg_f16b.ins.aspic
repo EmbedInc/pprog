@@ -194,9 +194,8 @@ sa_leave unbank
 ;   accordingly) for all but the last word of a write page.  For the last word,
 ;   the address is not altered.
 ;
-;   NEXTWAIT has been initialized with the TPROG value and CNTWAIT is zero (no
-;   wait interval in progress).  The OPn flags have all been cleared by OP_WRITE
-;   before the specific write routine is called.
+;   NEXTWAIT has been initialized with the TPROG value.  The OPn flags have all
+;   been cleared by OP_WRITE before the specific write routine is called.
 ;
 ;   This routine must jump to DONE_WRITE when done.
 ;

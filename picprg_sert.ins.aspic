@@ -608,6 +608,24 @@ r24m_bit unbank              ;back here to receive each new bit
 
 ;*******************************************************************************
 ;
+;   Subroutine SERT_RECV16MSS24
+;
+;   Receive a 24 bit word from the target in most to least significant bit
+;   order, and with the appropriate start, stop, and padding for a 16 bit
+;   payload.  The 16 payload bits are returned in REG1:REG0.
+;
+         glbsub  sert_recv16mss24, regf2
+
+         mcall   sert_recv24m ;receive the raw 24 bit word into REG2:REG1:REG0
+
+         rrcf    reg2        ;LSB-justify the payload bits
+         rrcf    reg1
+         rrcf    reg0
+
+         leaverest
+
+;*******************************************************************************
+;
 ;   Subroutine SERT_RECV14MSS24
 ;
 ;   Receive a 24 bit word from the target in most to least significant bit

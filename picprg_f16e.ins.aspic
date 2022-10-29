@@ -498,7 +498,6 @@ cfg182x  unbank
 ;   trashed.  NEXTWAIT has been initialized with the TPROG value and CNTWAIT is
 ;   zero (no wait interval in progress).  The OPn flags have all been cleared
 ;   by OP_WRITE before the specific write routine is called.
-;   For the PIC 16F183xx and related.
 ;
 ;   This version is for the 16F183xx and related.
 ;

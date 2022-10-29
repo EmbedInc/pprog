@@ -139,7 +139,7 @@ adr_nvmadru res  2           ;address of target NVMADRU register
          clrf    alg_write
          clrf    alg_read
 
-         movlw   10 * t2pms  ;init programming wait time to 10mS
+         movlw   10 * t2pms  ;init programming wait time to 10 ms
          movwf   tprog
 
          loadk24 tadr, 0     ;init target chip address of next operation
@@ -325,7 +325,7 @@ tblent   macro   adr
 ;
 ;   The wait interval must complete after this routine returns before any
 ;   new target chip operations are attempted.  The current Vdd voltage
-;   is preserved unless its off, in which case it will be set to normal.
+;   is preserved unless it is off, in which case it will be set to normal.
 ;
          glbsub  op_reset, regf0 | regf1 | regf2 | regf3 | regf8
 
@@ -335,10 +335,6 @@ tblent   macro   adr
          movff   tadrr+2, tadri+2
          bcf     flag_tadrkn ;init to target address is unknown
          bcf     flag_adrinc ;target address not incremented since reset
-
-;        bcf     flag_24h    ;init to this is not a 24H or 33F part
-;        loadk16 nvmcon_prog, h'4001' ;init dsPIC defaults
-;        loadk16 nvmcon_conf, h'4008'
 
          wait                ;make sure any existing wait interval has elapsed
          mcall   op_hold     ;hold the target in reset
@@ -685,9 +681,9 @@ reset_24 unbank              ;common part of PIC 24 and 33 reset
 ;   Table of routines that implement each of the specific algorithms.
 ;
          extern  f16_read, f16e_read, f16b_read, f18_read, core12_read, f30_read
-         extern  f16e_read183
+         extern  f16e_read183, f18b_read
 
-         startop alg_read, 8
+         startop alg_read, 9
 
          tblent  f16_read    ;1 - for 16Fxxx
          tblent  f18_read    ;2 - generic 18F, program space only
@@ -697,6 +693,7 @@ reset_24 unbank              ;common part of PIC 24 and 33 reset
          tblent  f16e_read   ;6 - for enhanced (4 digit) 16F
          tblent  f16b_read   ;7 - 8 bit opcodes, 24 bit data, like 16F15313
          tblent  f16e_read183 ;8 - 16F183xx and related
+         tblent  f18b_read   ;9 - PIC 18 version of 8 bit opcodes, 24 bit data
 ;
 ;   Illegal algorithm ID or no algorithm set.
 ;
@@ -730,8 +727,8 @@ reset_24 unbank              ;common part of PIC 24 and 33 reset
          extern  f16_write, write_12f6, core12_write, f30_write
          extern  write_16f87xa, write_16f716, write_16f688, write_18f2520
          extern  write_16f88, write_16f77, write_16f88x, write_16f182x
-         extern  f16b_write, write_16f183xx
-         startop alg_write, 14
+         extern  f16b_write, write_16f183xx, f18b_write
+         startop alg_write, 15
 
          tblent  f16_write   ;1 - for 16Fxxx
          tblent  write_12f6  ;2 - for 12F6xx
@@ -747,6 +744,7 @@ reset_24 unbank              ;common part of PIC 24 and 33 reset
          tblent  write_16f182x ;12 - BEGIN 24 and END 10, config BEGIN 8
          tblent  f16b_write  ;13 - for 16F with 8 bit prog commands, like 16F15313
          tblent  write_16f183xx ;14 - for 16F183xx and related
+         tblent  f18b_write  ;15 - PIC 18 with 8 bit commands, 24 bit data
 ;
 ;   Illegal algorithm ID or no algorithm set.
 ;
