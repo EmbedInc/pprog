@@ -132,6 +132,12 @@ sendopc  macro   opc
 ;   chip is TADRI.
 ;
          locsub  set_adr, regf0 | regf1 | regf2
+
+         movff   tadr+0, reg0 ;make local copy of address to set
+         movff   tadr+1, reg1
+         movff   tadr+2, reg2
+         skip_flag spdata    ;in EEPROM, will do single byte reads ?
+         bcf     reg0, 0     ;in program memory, will do double byte reads
 ;
 ;   Check for whether the address needs to be set in the target.
 ;
@@ -140,15 +146,15 @@ sendopc  macro   opc
 
          dbankif gbankadr
          movf    tadri+0, w  ;get curr adr low byte
-         xorwf   tadr+0, w   ;compare to desired adr low byte
+         xorwf   reg0, w     ;compare to desired adr low byte
          bnz     sa_set      ;mismatch, go set adr ?
 
          movf    tadri+1, w  ;get curr adr high byte
-         xorwf   tadr+1, w   ;compare to desired adr high byte
+         xorwf   reg1, w     ;compare to desired adr high byte
          bnz     sa_set      ;mismatch, go set adr ?
 
          movf    tadri+2, w  ;get curr adr upper byte
-         xorwf   tadr+2, w   ;compare to desired adr upper byte
+         xorwf   reg2, w     ;compare to desired adr upper byte
          bz      sa_leave    ;address already set as desired, nothing to do ?
 ;
 ;   Explicitly set the address in the target chip.
@@ -157,18 +163,11 @@ sa_set   unbank
          wait                ;wait for any previous operation to complete
          sendopc opc_adr     ;SET ADDRESS opcode
          ;
-         ;   Update TADRI to TADR, and also get the address into REG2:REG1:REG0.
+         ;   Update local copy of target address.
          ;
-         dbankif gbankadr
-         movf    tadr+0, w   ;get new adr low byte
-         movwf   tadri+0     ;update local copy of target address
-         movwf   reg0
-         movf    tadr+1, w   ;get new adr high byte
-         movwf   tadri+1     ;update local copy of target address
-         movwf   reg1
-         movf    tadr+2, w   ;get new adr upper byte
-         movwf   tadri+2     ;update local copy of target address
-         movwf   reg2
+         movff   reg0, tadri+0
+         movff   reg1, tadri+1
+         movff   reg2, tadri+2
          ;
          ;   Add DATADR to the address to send if in data (EEPROM) space, not
          ;   program memory space.  EEPROM contents is mapped to EEADR in the
@@ -195,7 +194,7 @@ sa_dspdat unbank             ;done handling in data space
          rlcf    reg0        ;shift 22 bit address left one bit
          rlcf    reg1
          rlcf    reg2
-         opcwait 18          ;guarantee minimum wait after opcode
+         opcwait 16          ;guarantee minimum wait after opcode
          gcall   sert_send24m ;send the 24 data bits after the opcode
 
          setflag tadrkn      ;the address in the target is now known
@@ -234,10 +233,24 @@ sa_leave unbank
 ;
          gcall   op_inc_tadri ;add another 1 to local copy of target address
 
-         rrcf    reg2        ;return 16 bit data value in REG1:REG0
-         rrcf    reg1
+         dbankif gbankadr
+         btfsc   tadr+0, 0   ;reading low byte of pair ?
+         jump    rd_progh    ;no, go return the high byte
+         ;
+         ;   Return the low byte.
+         ;
+         rrcf    reg1        ;position low byte into REG0
          rrcf    reg0
-
+         clrf    reg1        ;return unused bits 0
+         gjump   done_read
+         ;
+         ;   Return the high byte.
+         ;
+rd_progh unbank
+         rrcf    reg2        ;get high byte
+         rrcf    reg1, w
+         movwf   reg0        ;return it in REG0
+         clrf    reg1        ;return unused bits 0
          gjump   done_read
 ;
 ;   Reading data memory.  The data is 8 bits wide, and the target address is
@@ -248,7 +261,6 @@ rd_spdata
          rrcf    reg1        ;get the 8 bit data value into REG0
          rrcf    reg0
          clrf    reg1        ;set remaining bits of returned value to 0
-
          gjump   done_read
 
 ;*******************************************************************************
@@ -274,16 +286,44 @@ rd_spdata
 ;
          wait                ;wait for any previous operation to complete
          sendopc opc_wdat_inc ;opcode for write to curr address, increment address
+
+         skip_nflag spdata   ;in program memory address space ?
+         jump    wr_spdata   ;no, in data (EEPROM) address space
 ;
-;   Send the 24 bit data following the opcode.  The actual data to write is
-;   shifted left 1 bit within the 24 bit word, with unused bits set to 0.
+;   Writing to program memory.  The data is 16 bits wide, writing to two
+;   locations at the same time.
 ;
+         dbankif gbankadr
+         btfsc   tadr+0, 0   ;writing low byte of pair ?
+         jump    wr_progh    ;no, go return the high byte
+         ;
+         ;   The data in REG0 is for the low byte.
+         ;
+         setf    reg1        ;value to leave high byte as is
+         jump    wr_senddat  ;go send the 16 bit value in REG1:REG0
+         ;
+         ;   The data in REG0 is for the high byte.
+         ;
+wr_progh unbank
+         movff   reg0, reg1  ;move data byte to high byte
+         setf    reg0        ;value to leave low byte as it
+         jump    wr_senddat  ;go send the 16 bit value in REG1:REG0
+;
+;   Writing to data memory.  The data is 8 bits wide.
+;
+wr_spdata unbank
+         clrf    reg1        ;set unused bits to 0
+;
+;   Send the data in REG1:REG0 as the payload of the 24 bit data word for the
+;   opcode that has already been sent.
+;
+wr_senddat unbank
+         clrf    reg2        ;set unused bits to 0
+
          bcf     status, c   ;set value of bit to shift in to 0
          rlcf    reg0        ;shift the write value into place
          rlcf    reg1
          rlcf    reg2
-         movlw   h'01'       ;mask off unused high bits
-         andlw   reg2
 
          opcwait 9           ;guarantee min wait after opcode
          gcall   sert_send24m ;send the 24 bits in REG2:REG1:REG0

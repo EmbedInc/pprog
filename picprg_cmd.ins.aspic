@@ -753,8 +753,7 @@
 ;
 ;   Command SPPROG
 ;
-;   Select the program memory space for subsequent read and write
-;   operations.
+;   Select the program memory space for subsequent read and write operations.
 ;
   ifdef cm0spprog
          command spprog
@@ -770,8 +769,7 @@
 ;
 ;   Command SPDATA
 ;
-;   Select the data memory space for subsequent read and write
-;   operations.
+;   Select the data memory space for subsequent read and write operations.
 ;
   ifdef cm0spdata
          command spdata
@@ -791,6 +789,7 @@ tadri_inv unbank             ;jump here to invalidate cached target chip address
          movwf   tadri+1
          comf    tadr+2, w
          movwf   tadri+2
+
          bcf     flag_tadrkn ;flag target address as unknown
          goto    cmd_done    ;done processing this command
     endif
