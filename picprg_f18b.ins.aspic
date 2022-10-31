@@ -95,6 +95,15 @@ tdlyns   equ     [rnd [* tdly 1e9]] ;TDLY in ns
 ;
          defram  lbankadr
 
+cacheadr res     3           ;start address of cached data
+cachedat res     1           ;high byte of pair on read, low byte on write
+flg      res     1           ;local flag bits, use FLG_xxx constants
+         ;
+         ;   Bit numbers for the individual flags in FLG.
+         ;
+flg_cachrd equ   0           ;cache contains read data high byte
+flg_cachwr equ   1           ;cache contains write data low byte
+
 
 .f18b    code
 ;*******************************************************************************
@@ -215,7 +224,61 @@ sa_leave unbank
 ;   Allowed to trash REG2-REG3, REG8.
 ;
          glbent  f18b_read
+;
+;   Return data from the cache if all the conditions are valid.  The conditions
+;   are:
+;
+;     - Reading program memory, not data memory.  Data memory is physically read
+;       one byte at a time anyway.
+;
+;     - The high byte of a pair is being requested.  This means the address is
+;       odd.
+;
+;     - The target address must be known.  We don't really need to know the
+;       address in the target, but this flag is cleared by external actions that
+;       can also make the cached data invalid.
+;
+;     - The cache must contain valid read data.
+;
+;     - The desired address must match the cache address, except the low bit.
+;       This means the desired address must be one of the two addresses of the
+;       data stored in the cache.
+;
+         dbankif gbankadr
+         skip_nflag spdata   ;reading program memory, not data memory ?
+         jump    rd_ncache
+         btfss   tadr+0, 0   ;reading at odd address ?
+         jump    rd_ncache
+         skip_flag tadrkn    ;our local copy of the target address is valid ?
+         jump    rd_ncache
 
+         dbankif lbankadr
+         btfss   flg, flg_cachrd ;there is read data in the cache ?
+         jump    rd_ncache
+
+         movff   tadr+0, wreg ;check cache address low byte
+         xorwf   cachedat+0, w
+         andlw   h'FE'       ;low address bit is irrelevant
+         bnz     rd_ncache
+
+         movff   tadr+1, wreg ;check cache address high byte
+         xorwf   cachedat+1, w
+         bnz     rd_ncache
+
+         movff   tadr+2, wreg ;check cache address upper byte
+         xorwf   cachedat+2, w
+         bnz     rd_ncache
+         ;
+         ;   The cache contains the requested byte.
+         ;
+         movff   cachedat, reg0 ;return the byte from the cache
+         clrf    reg1        ;return unused bits 0
+         gjump   done_read
+
+rd_ncache unbank             ;can't use cache
+;
+;   The cache can not be used, do an actual read.
+;
          mcall   set_adr     ;make sure target chip is at the desired address
 
          wait                ;wait for any previous operation to complete
@@ -223,15 +286,39 @@ sa_leave unbank
          opcwait 2           ;guarantee min wait after opcode
          gcall   sert_recv24m ;get the raw data word into REG2:REG1:REG0
 
-         gcall   op_inc_tadri ;add 1 to local copy of target address
          skip_nflag spdata   ;in program memory address space ?
          jump    rd_spdata   ;no, in data (EEPROM) address space
 ;
-;   Reading program memory.  The data is 16 bits wide, and the target address is
-;   advanced by 2.  The local copy of the target address has already been
-;   incremented by 1.
+;   Reading program memory.  The data is 16 bits wide, and the target address was
+;   advanced by 2.  The raw 24 bit data is in REG2:REG1:REG0.
 ;
-         gcall   op_inc_tadri ;add another 1 to local copy of target address
+         ;
+         ;   Extract the 16 bit data value into REG1:REG0 and save the high byte
+         ;   in the cache.
+         ;
+         dbankif lbankadr
+         rrcf    reg2        ;position 16 bit word into REG1:REG0
+         rrcf    reg1
+         rrcf    reg0
+
+         movff   reg1, cachedat ;save high byte as the cache data
+
+         clrf    flg         ;indicate cache contains read data
+         bsf     flg, flg_cachrd
+
+         movff   tadri+0, cacheadr+0 ;set address of cached word
+         movff   tadri+1, cacheadr+1
+         movff   tadri+2, cacheadr+2
+         ;
+         ;   Update local copy of target address.  The read command incremented
+         ;   the target address by 2.
+         ;
+         dbankif gbankadr
+         movlw   2           ;update local copy of address in target
+         addwf   tadri+0
+         movlw   0
+         addwfc  tadri+1
+         addwfc  tadri+2
 
          dbankif gbankadr
          btfsc   tadr+0, 0   ;reading low byte of pair ?
@@ -239,28 +326,33 @@ sa_leave unbank
          ;
          ;   Return the low byte.
          ;
-         rrcf    reg1        ;position low byte into REG0
-         rrcf    reg0
          clrf    reg1        ;return unused bits 0
          gjump   done_read
          ;
          ;   Return the high byte.
          ;
 rd_progh unbank
-         rrcf    reg2        ;get high byte
-         rrcf    reg1, w
-         movwf   reg0        ;return it in REG0
+         movff   reg1, reg0  ;move the high byte into position
          clrf    reg1        ;return unused bits 0
          gjump   done_read
 ;
-;   Reading data memory.  The data is 8 bits wide, and the target address is
-;   advanced by 1.  The local copy of the target address has already been
-;   incremented by 1.
+;   Reading data memory.  The data is 8 bits wide, and the target address was
+;   advanced by 1.
 ;
-rd_spdata
+rd_spdata dbankis gbankadr
          rrcf    reg1        ;get the 8 bit data value into REG0
          rrcf    reg0
-         clrf    reg1        ;set remaining bits of returned value to 0
+         clrf    reg1        ;return unused bits 0
+
+         dbankif gbankadr
+         incf    tadri+0     ;update local copy of address in target
+         movlw   0
+         addwfc  tadri+1
+         addwfc  tadri+2
+
+         dbankif lbankadr
+         clrf    flg         ;invalidate the cache
+
          gjump   done_read
 
 ;*******************************************************************************
