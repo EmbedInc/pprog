@@ -146,7 +146,7 @@ sendopc  macro   opc
          movff   tadr+1, reg1
          movff   tadr+2, reg2
          skip_flag spdata    ;in EEPROM, will do single byte reads ?
-         bcf     reg0, 0     ;in program memory, will do double byte reads
+         bcf     reg0, 0     ;in program memory, will do double byte rd/wr
 ;
 ;   Check for whether the address needs to be set in the target.
 ;
@@ -368,71 +368,149 @@ rd_spdata dbankis gbankadr
 ;
 ;   Allowed to trash REG0-REG3, REG8.
 ;
-         glbent  f18b_write
+;   In this implementation, the data word is always 8 bits wide.  The data byte
+;   is therefore in REG0.  REG1 should be 0, but is ignored anyway.
 ;
-;   Make sure the target chip address is set to the word to write.
+         glbent  f18b_write
+
+         skip_nflag spdata   ;writing to program memory ?
+         jump    wr_spdata   ;no, writing to data memory
+
+;*******************
+;
+;   Writing to program memory.
+;
+;   Program memory is written to 16 bits at a time.  The write is performed to
+;   the even (low) address, and the address is then incremented by 2.
+;
+;   Check for saving the data in the cache instead of writing it.  Bytes for
+;   even addresses are saved in the cache.
+;
+         dbankif gbankadr
+         btfsc   tadr+0, 0   ;writing to byte at even address ?
+         jump    wr_ncache
+         ;
+         ;   Save this byte in the cache and return.
+         ;
+         movff   reg0, cachedat ;save the data byte
+         movff   tadr+0, cacheadr+0 ;save the address
+         movff   tadr+1, cacheadr+1
+         movff   tadr+2, cacheadr+2
+         dbankif lbankadr
+         clrf    flg         ;indicate cache contains a write byte
+         bsf     flg, flg_cachwr
+
+         gjump   done_write
+
+wr_ncache unbank             ;don't just save data in the cache
+;
+;   This byte is for the upper (odd) address of a pair.  The whole pair will be
+;   written.  The low byte will be taken from the cache, if available.  If not
+;   available, FFh is substituted.  Writing FFh preserves the origina byte
+;   value.
 ;
          mcall   set_adr     ;make sure target chip is at the desired address
 ;
-;   Send opcode that writes to the current location then increments the address.
+;   Send programming command opcode to do the write.
 ;
          wait                ;wait for any previous operation to complete
          sendopc opc_wdat_inc ;opcode for write to curr address, increment address
-
-         skip_nflag spdata   ;in program memory address space ?
-         jump    wr_spdata   ;no, in data (EEPROM) address space
 ;
-;   Writing to program memory.  The data is 16 bits wide, writing to two
-;   locations at the same time.
+;   Assemble the 16 bits to write in REG1:REG0.  The current data byte in REG0
+;   is actually the high byte.  The low byte comes from the cache, or FFh if the
+;   cache is invalid.
+;
+         movff   reg0, reg1  ;get high byte into place
+         setf    reg0        ;init low byte to cache data not available
+         ;
+         ;   Get the cache data byte into REG0 if the cache is valid for this
+         ;   byte.
+         ;
+         dbankif lbankadr
+         btfss   flg, flg_cachwr ;the cache contains a write byte ?
+         jump    wr_ncachv
+
+         movff   tadr+0, reg2 ;check address low byte
+         movf    cacheadr+0, w
+         xorwf   reg2, w
+         andlw   h'FE'       ;ignore low bit mismatch
+         bnz     wr_ncachv
+
+         movff   tadr+1, reg2 ;check address high byte
+         movf    cacheadr+1, w
+         xorwf   reg2, w
+         bnz     wr_ncachv
+
+         movff   tadr+2, reg2 ;check address upper byte
+         movf    cacheadr+2, w
+         xorwf   reg2, w
+         bnz     wr_ncachv
+         ;
+         ;   The cache data is valid.
+         ;
+         movff   cachedat, reg0 ;get low byte value from the cache
+
+wr_ncachv unbank             ;skip here on cache data not valid
+;
+;   Increment our local copy of the target address by 2 to match what the write
+;   command did.
 ;
          dbankif gbankadr
-         btfsc   tadr+0, 0   ;writing low byte of pair ?
-         jump    wr_progh    ;no, go return the high byte
-         ;
-         ;   The data in REG0 is for the low byte.
-         ;
-         setf    reg1        ;value to leave high byte as is
-         jump    wr_senddat  ;go send the 16 bit value in REG1:REG0
-         ;
-         ;   The data in REG0 is for the high byte.
-         ;
-wr_progh unbank
-         movff   reg0, reg1  ;move data byte to high byte
-         setf    reg0        ;value to leave low byte as it
-         jump    wr_senddat  ;go send the 16 bit value in REG1:REG0
-;
-;   Writing to data memory.  The data is 8 bits wide.
-;
-wr_spdata unbank
-         clrf    reg1        ;set unused bits to 0
-;
-;   Send the data in REG1:REG0 as the payload of the 24 bit data word for the
-;   opcode that has already been sent.
-;
-wr_senddat unbank
-         clrf    reg2        ;set unused bits to 0
-
-         bcf     status, c   ;set value of bit to shift in to 0
-         rlcf    reg0        ;shift the write value into place
-         rlcf    reg1
-         rlcf    reg2
-
-         opcwait 9           ;guarantee min wait after opcode
-         gcall   sert_send24m ;send the 24 bits in REG2:REG1:REG0
-         start_wait_next     ;start the wait for the write to complete
-;
-;   Increment our local copy of the current address to match that now in the
-;   target chip.  The opcode caused the target address to increment by 2 when
-;   writing to normal program memory, and 1 when writing to EEPROM.
-;
-         movlw   2           ;init increment amount for program memory
-         skip_nflag spdata   ;really are in program memory space ?
-         movlw   1           ;no, get increment for data space
-
-         dbankif gbankadr
-         addwf   tadri+0     ;increment local copy of target address by W
+         movlw   2           ;get the increment amount
+         addwf   tadri+0     ;do the increment
          movlw   0
          addwfc  tadri+1
          addwfc  tadri+2
+;
+;   Write the data in REG1:REG0.  The programming command opcode has already
+;   been sent.
+;
+         clrf    reg2        ;extend the 16 bit write data into REG2:REG1:REG0
+         bcf     status, c   ;cause 0 bit to be shifted in
+         rlcf    reg0        ;shift left 1 bit to make 24 bit data word
+         rlcf    reg1
+         rlcf    reg2
 
-         gjump   done_write  ;all done
+         opcwait 19          ;guarantee min wait after opcode
+         gcall   sert_send24m ;send the 24 bits in REG2:REG1:REG0
+         start_wait_next     ;start the wait for the write to complete
+
+         gjump   done_write  ;all done with write to program memory
+
+;*******************
+;
+;   Writing to data memory.
+;
+;   Data memory is written one byte at a time.
+;
+wr_spdata unbank
+         mcall   set_adr     ;make sure target chip is at the desired address
+
+         wait                ;wait for any previous operation to complete
+         sendopc opc_wdat_inc ;opcode for write to curr address, increment address
+;
+;   Increment our local copy of the target address by 1 to match what the write
+;   command did.
+;
+         dbankif gbankadr
+         incf    tadri+0     ;increment the low byte
+         movlw   0
+         addwfc  tadri+1     ;propagate carry to higher bytes
+         addwfc  tadri+2
+;
+;   Write the data in REG0.  The programming command opcode has already been
+;   sent.
+;
+         clrf    reg1        ;expand write data into REG2:REG1:REG0
+         clrf    reg2
+
+         bcf     status, c   ;cause 0 bit to be shifted in
+         rlcf    reg0        ;shift left 1 bit to make 24 bit data word
+         rlcf    reg1
+         rlcf    reg2
+
+         opcwait 13          ;guarantee min wait after opcode
+         gcall   sert_send24m ;send the 24 bits in REG2:REG1:REG0
+         start_wait_next     ;start the wait for the write to complete
+
+         gjump   done_write  ;all done with write to data memory
