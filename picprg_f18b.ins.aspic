@@ -154,6 +154,12 @@ sendopc  macro   opc
          jump    sa_set      ;no, go set it
 
          dbankif gbankadr
+         movf    tadri+0, w
+         iorwf   tadri+1, w
+         iorwf   tadri+2, w
+         bz      sa_set      ;always set addres on special case of 0
+
+         dbankif gbankadr
          movf    tadri+0, w  ;get curr adr low byte
          xorwf   reg0, w     ;compare to desired adr low byte
          bnz     sa_set      ;mismatch, go set adr ?
